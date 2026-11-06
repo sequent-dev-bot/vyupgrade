@@ -608,3 +608,74 @@ def measured(a: address) -> uint256:
     assert "    def version() -> String[...]: view\n" in result.source
     assert "    return len(staticcall IFoo(a).version())\n" in result.source
     assert [fix.rule for fix in result.fixes if fix.rule.startswith("VY12")] == ["VY125"]
+
+
+def test_qualified_implements_leaves_a_same_named_local_interface_alone(
+    tmp_path: Path, config
+) -> None:
+    reader = """#pragma version 0.4.3
+import Types
+
+interface IFoo:
+    def data() -> Bytes[1]: view
+
+implements: Types.IFoo
+
+@external
+@view
+def data() -> Bytes[5]:
+    return b"abcde"
+
+@external
+@view
+def wide(a: address) -> Bytes[10]:
+    return staticcall IFoo(a).data()
+"""
+    files = {
+        "Types.vy": "#pragma version 0.4.3\ninterface IFoo:\n    def data() -> Bytes[5]: view\n",
+        "Reader.vy": reader,
+    }
+
+    result = _migrate(tmp_path, config, files, "Reader.vy")
+
+    assert "    def data() -> Bytes[1]: view\n" in result.source
+    assert [fix.rule for fix in result.fixes if fix.rule.startswith("VY12")] == []
+
+
+def test_ambiguous_absolute_import_of_the_implemented_module_is_not_bound(
+    tmp_path: Path, config
+) -> None:
+    interface = "#pragma version 0.4.3\n@external\n@view\ndef data() -> Bytes[{n}]: ...\n"
+    files = {
+        "IFoo.vyi": interface.format(n=5),
+        "sub/IFoo.vyi": interface.format(n=1),
+        "sub/Impl.vy": """#pragma version 0.4.3
+import IFoo
+
+implements: IFoo
+
+@external
+@view
+def data() -> Bytes[5]:
+    return b"abcde"
+""",
+    }
+
+    result = _migrate(tmp_path, config, files, "sub/IFoo.vyi")
+
+    assert "def data() -> Bytes[1]: ..." in result.source
+    assert [fix.rule for fix in result.fixes if fix.rule.startswith("VY12")] == []
+
+
+def test_implementation_bound_may_use_a_constant_declared_later(tmp_path: Path, config) -> None:
+    implementation = IMPLEMENTATION.format(return_type="String[BOUND]").replace(
+        "implements: IFoo\n",
+        "implements: IFoo\n\nBOUND: constant(uint256) = OTHER + 1\nOTHER: constant(uint256) = 4\n",
+    )
+    files = {"IFoo.vyi": INTERFACE.format(return_type="String[1]"), "Foo.vy": implementation}
+
+    result = _migrate(tmp_path, config, files, "IFoo.vyi")
+
+    assert [(fix.before, fix.after) for fix in result.fixes if fix.rule == "VY125"] == [
+        ("String[1]", "String[...]")
+    ]
