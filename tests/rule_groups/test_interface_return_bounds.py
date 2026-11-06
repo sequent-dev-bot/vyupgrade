@@ -610,8 +610,12 @@ def measured(a: address) -> uint256:
     assert [fix.rule for fix in result.fixes if fix.rule.startswith("VY12")] == ["VY125"]
 
 
+@pytest.mark.parametrize(
+    "implements",
+    ["Types.IFoo", "Types . IFoo", "(Types).IFoo", "(\n    Types  # remote\n).IFoo"],
+)
 def test_qualified_implements_leaves_a_same_named_local_interface_alone(
-    tmp_path: Path, config
+    tmp_path: Path, config, implements: str
 ) -> None:
     reader = """#pragma version 0.4.3
 import Types
@@ -619,7 +623,7 @@ import Types
 interface IFoo:
     def data() -> Bytes[1]: view
 
-implements: Types.IFoo
+implements: IMPLEMENTS
 
 @external
 @view
@@ -630,7 +634,7 @@ def data() -> Bytes[5]:
 @view
 def wide(a: address) -> Bytes[10]:
     return staticcall IFoo(a).data()
-"""
+""".replace("IMPLEMENTS", implements)
     files = {
         "Types.vy": "#pragma version 0.4.3\ninterface IFoo:\n    def data() -> Bytes[5]: view\n",
         "Reader.vy": reader,
