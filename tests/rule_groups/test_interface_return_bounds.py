@@ -683,3 +683,21 @@ def test_implementation_bound_may_use_a_constant_declared_later(tmp_path: Path, 
     assert [(fix.before, fix.after) for fix in result.fixes if fix.rule == "VY125"] == [
         ("String[1]", "String[...]")
     ]
+
+
+@pytest.mark.parametrize(
+    ("expression", "rules", "diagnostics"),
+    [("1 << 3", ["VY125"], []), ('len(b"abcde")', [], ["VYD020"])],
+)
+def test_implementation_bound_constant_is_folded_or_diagnosed(
+    tmp_path: Path, config, expression: str, rules: list[str], diagnostics: list[str]
+) -> None:
+    implementation = IMPLEMENTATION.format(return_type="String[N]").replace(
+        "implements: IFoo\n", f"implements: IFoo\n\nN: constant(uint256) = {expression}\n"
+    )
+    files = {"IFoo.vyi": INTERFACE.format(return_type="String[1]"), "Foo.vy": implementation}
+
+    result = _migrate(tmp_path, config, files, "IFoo.vyi")
+
+    assert [fix.rule for fix in result.fixes if fix.rule.startswith("VY12")] == rules
+    assert [diagnostic.rule for diagnostic in result.diagnostics] == diagnostics

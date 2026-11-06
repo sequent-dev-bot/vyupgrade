@@ -4,8 +4,9 @@
 
 - Add `VY125` to replace interface return bounds that an implementing contract
   exceeds with the Vyper 0.5 wildcard (`String[...]`, `Bytes[...]`,
-  `DynArray[T, ...]`), by default for targets from 0.5.0a2. Bounds written as
-  integer constants are compared too. Interfaces that no contract in the
+  `DynArray[T, ...]`), by default for targets from 0.5.0a2. Bounds named by
+  integer constants defined with literal arithmetic are compared too, and
+  `VYD020` reports bounds whose constants can't be evaluated. Interfaces that no contract in the
   closure implements are left alone. `VY124` widening now needs `--aggressive`
   with `VY125` ignored.
 
