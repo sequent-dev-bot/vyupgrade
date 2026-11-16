@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import tomllib
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field as dataclass_field, replace
 from functools import cache
@@ -275,13 +275,64 @@ def _source_compile_path(path: Path, config: Config) -> Iterator[tuple[Path, Con
     if config.source_snapshot is None:
         yield path, config
         return
-    snapshot = config.source_snapshot
+    snapshot = _entry_closure(config.source_snapshot, path.resolve(), config.compiler_search_paths)
     with target_overlay(snapshot.sources, config.target_version, config.compiler_search_paths,
                         snapshot=snapshot, include_dependencies=True) as overlay:
         assert overlay is not None
         yield overlay.paths[path.resolve()], replace(
             config, compiler_search_paths=_overlay_search_paths(overlay, config.compiler_search_paths)
         )
+
+
+def _entry_closure(
+    snapshot: ImportClosure, entry: Path, search_paths: tuple[Path, ...]
+) -> ImportClosure:
+    """Narrow a batch snapshot to ``entry``'s project and the members it imports, transitively.
+
+    Independent projects in one batch may hold files with the same
+    project-relative path, which would collide in a shared overlay. Every batch
+    root placed under ``entry``'s root is kept with its own imports, so an import
+    of one that the text scanner misses still resolves. Each file resolves
+    imports against the configured search paths and the roots that contain it
+    first; only an import those miss falls back to the other projects' roots.
+    Imports resolve to captured members only.
+    """
+    entry_root = _layout_root(snapshot, entry)
+    same_root = {path for path in snapshot.roots if _layout_root(snapshot, path) == entry_root}
+    members = {
+        path
+        for path, _source, _relative, _override in _walk_validation_closure(
+            (entry_root,),
+            tuple(search_path.resolve() for search_path in search_paths),
+            snapshot.common_root,
+            snapshot.sources,
+            entry_paths=same_root | {entry},
+            project_roots=tuple(dict.fromkeys((entry_root, *snapshot.source_roots))),
+            captured_only=True,
+        )
+    }
+    return replace(
+        snapshot,
+        roots=(entry,),
+        dependencies=tuple(path for path in snapshot.dependencies if path in members - {entry}),
+        consumers={path: (entry,) for path in snapshot.consumers if path in members - {entry}},
+        source_roots=tuple(
+            root
+            for root in snapshot.source_roots
+            if any(path.is_relative_to(root) for path in members)
+        ),
+        contents=MappingProxyType(
+            {path: content for path, content in snapshot.contents.items() if path in members}
+        ),
+        layouts=MappingProxyType(
+            {path: layout for path, layout in snapshot.layouts.items() if path in members}
+        ),
+    )
+
+
+def _layout_root(snapshot: ImportClosure, path: Path) -> Path:
+    """The root the batch walk placed ``path`` under; a dependency may live outside every source root."""
+    return path.parents[len(snapshot.layouts[path].parts) - 1]
 
 
 def compile_source_file(path: Path, config: Config, source_version: str | None) -> CompileResult:
@@ -735,7 +786,23 @@ def _walk_validation_closure(
     overrides: Mapping[Path, str],
     *,
     entry_paths: Iterable[Path] | None = None,
+    project_roots: tuple[Path, ...] = (),
+    captured_only: bool = False,
 ) -> Iterator[tuple[Path, str, Path, bool]]:
+    """Walk the import closure of ``overrides``.
+
+    Each file resolves imports against ``import_roots`` plus those of
+    ``project_roots`` that contain it; an import none of those resolve falls
+    back to the other ``project_roots``. With ``captured_only``, imports
+    resolve only to ``overrides``, never to the live filesystem.
+    """
+
+    def file_import_roots(path: Path) -> tuple[Path, ...]:
+        return (*import_roots, *(root for root in project_roots if _is_relative_to(path, root)))
+
+    def fallback_import_roots(path: Path) -> tuple[Path, ...]:
+        return tuple(root for root in project_roots if not _is_relative_to(path, root))
+
     override_paths = set(overrides)
     source_cache = dict(overrides)
     if entry_paths is None:
@@ -750,7 +817,7 @@ def _walk_validation_closure(
                         path,
                         import_source,
                         source_root,
-                        import_roots,
+                        file_import_roots(path),
                         relative_path,
                     )
                     if imported.path in override_paths
@@ -813,8 +880,10 @@ def _walk_validation_closure(
             current,
             import_source,
             current_root,
-            import_roots,
+            file_import_roots(current),
             current_relative,
+            captured=override_paths if captured_only else None,
+            fallback_roots=fallback_import_roots(current),
         ):
             if imported.path in processed:
                 existing_relative = layouts[imported.path]
@@ -854,50 +923,65 @@ def _validation_import_sources(
     source_root: Path,
     import_roots: tuple[Path, ...],
     relative_path: Path | None = None,
+    captured: Collection[Path] | None = None,
+    fallback_roots: tuple[Path, ...] = (),
 ) -> tuple[_ResolvedValidationImport, ...]:
+    """Resolve each import against ``import_roots``, else against ``fallback_roots``."""
+
+    def resolve(module: str, names: tuple[str, ...]) -> tuple[_ResolvedValidationImport, ...]:
+        resolved = _resolve_validation_import(
+            path, source_root, module, names, import_roots, relative_path, captured
+        )
+        if not resolved and fallback_roots:
+            resolved = _resolve_validation_import(
+                path, source_root, module, names, fallback_roots, relative_path, captured
+            )
+        return resolved
+
     imports: list[_ResolvedValidationImport] = []
     mask = code_mask(source)
     code_source = "".join(
         char if is_code or char in "\r\n" else " "
         for char, is_code in zip(source, mask, strict=True)
     )
-    for line in code_source.splitlines():
-        stripped = line.split("#", 1)[0].strip()
+    for stripped in _joined_code_lines(code_source):
         if not stripped:
             continue
         import_match = re.match(
-            r"import\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*)\b",
+            r"import\s+([A-Za-z_][A-Za-z0-9_]*(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)*)\b",
             stripped,
         )
         if import_match:
-            imports.extend(
-                _resolve_validation_import(
-                    path,
-                    source_root,
-                    import_match.group(1),
-                    (),
-                    import_roots,
-                    relative_path,
-                )
-            )
+            imports.extend(resolve(re.sub(r"\s+", "", import_match.group(1)), ()))
             continue
         from_match = re.match(
-            r"from\s+([.A-Za-z_][.A-Za-z0-9_]*)\s+import\s+(.+)$",
+            # ``.`` and ``(`` are tokens of their own: ``from.lib import x``,
+            # ``from . lib import x``, ``from .import x`` and ``from . import(x)``
+            # are all legal.
+            r"from(?:\s+|(?=\.))([.A-Za-z_][.A-Za-z0-9_\s]*?)(?:\s+|(?<=\.))import\b\s*(.+)$",
             stripped,
         )
         if from_match:
-            names = tuple(_imported_module_names(from_match.group(2)))
-            imports.extend(
-                _resolve_validation_import(
-                    path,
-                    source_root,
-                    from_match.group(1),
-                    names,
-                    import_roots,
-                    relative_path,
-                )
-            )
+            module = re.sub(r"\s+", "", from_match.group(1))
+            # Each name falls back on its own: ``from x import a, b`` may find
+            # ``a`` in the file's roots and ``b`` only in another project.
+            for name in tuple(_imported_module_names(from_match.group(2))) or (None,):
+                imports.extend(resolve(module, () if name is None else (name,)))
     return tuple(dict.fromkeys(imports))
+
+
+def _joined_code_lines(code_source: str) -> Iterator[str]:
+    """Yield stripped code lines, joining backslash and parenthesized continuations."""
+    pending = ""
+    for line in code_source.splitlines():
+        pending = f"{pending} {line.split('#', 1)[0].strip()}"
+        if pending.endswith("\\"):
+            pending = pending[:-1]
+        elif pending.count("(") <= pending.count(")"):
+            yield pending.strip()
+            pending = ""
+    if pending.strip():
+        yield pending.strip()
 
 
 def _imported_module_names(imports: str) -> Iterator[str]:
@@ -917,7 +1001,9 @@ def _resolve_validation_import(
     names: tuple[str, ...],
     import_roots: tuple[Path, ...],
     relative_path: Path | None,
+    captured: Collection[Path] | None = None,
 ) -> tuple[_ResolvedValidationImport, ...]:
+    """Resolve an import to existing files, or with ``captured``, to its members only."""
     bases, module_parts = _validation_import_bases(
         path, source_root, module, import_roots, relative_path
     )
@@ -950,7 +1036,8 @@ def _resolve_validation_import(
                 continue
         except (OSError, ValueError):
             continue
-        if resolved_candidate.exists() and resolved_candidate.suffix in VALIDATION_SOURCE_SUFFIXES:
+        found = resolved_candidate.exists() if captured is None else resolved_candidate in captured
+        if found and resolved_candidate.suffix in VALIDATION_SOURCE_SUFFIXES:
             resolved.setdefault(resolved_candidate, (import_root, candidate_relative))
     return tuple(
         _ResolvedValidationImport(path, import_root, candidate_relative)
