@@ -4,6 +4,7 @@ import re
 
 from ..models import Diagnostic, Fix
 from .legacy_call_helpers import iter_calls
+from ..rule_helpers import operator_operand
 from ..rule_registry import Rule, RuleContext, crossing, target_floor
 from ..source import (
     TextEdit,
@@ -240,7 +241,7 @@ def _unwrap_legacy_builtin(source: str, call_name: str, rule: str) -> tuple[str,
         args = split_top_level_args(raw_args)
         if args is None or len(args) != 1:
             continue
-        replacement = args[0].strip()
+        replacement = operator_operand(args[0].strip())
         edits.append(TextEdit(match.start(), close + 1, replacement))
         fixes.append(
             Fix(
