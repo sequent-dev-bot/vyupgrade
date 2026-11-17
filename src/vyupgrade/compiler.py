@@ -351,15 +351,28 @@ def compile_source_file(path: Path, config: Config, source_version: str | None) 
         command, suppress_warnings = _prepare_command(
             config.source_vyper, source_version or infer_pragma(staged.read_text()), config.source_python
         )
+        # The source compile is a single attested attempt, so formats an old
+        # compiler cannot produce are left out up front rather than retried.
+        unavailable = _source_formats_unsupported_by(command)
         result = _run_compile_with_formats(
-            command, staged, compile_config, SOURCE_FORMATS, (), suppress_warnings,
-            project_compiler=True, allow_format_retries=False, environment_path=path,
+            command, staged, compile_config,
+            tuple(name for name in SOURCE_FORMATS if name not in unavailable), (), suppress_warnings,
+            project_compiler=True, allow_format_retries=False, unavailable_formats=unavailable,
+            environment_path=path,
         )
         if config.source_vyper and _needs_public_error_evidence(result, config):
             return _add_explicit_error_evidence(
                 result, command, staged, path, compile_config, suppress_warnings
             )
         return result
+
+
+def _source_formats_unsupported_by(command: list[str]) -> tuple[str, ...]:
+    version = parse_version(_command_vyper_version(command))
+    if version is not None and version < VyperVersion("0.2.16"):
+        # `-f layout` first shipped in Vyper 0.2.16.
+        return ("layout",)
+    return ()
 
 
 def compile_target_source(
