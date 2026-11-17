@@ -25,7 +25,7 @@ from .models import (
     ValidationDecision,
 )
 from .project import discover_files
-from .reporting import HumanReporter, write_json_report
+from .reporting import HumanReporter, can_replace_json_report, write_json_report
 from .validation import decide_run_validation, validation_exit_code
 from .versions import MigrationContext
 from .write_plan import MigrationPlan, PlanConflictError, WriteTransactionError
@@ -133,6 +133,13 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"target {config.target_version} predates Vyper archive output "
             f"(requires >= {compiler.ARCHIVE_TARGET_FLOOR})",
+            file=sys.stderr,
+        )
+        return 4
+    if config.report_json and not can_replace_json_report(config.report_json):
+        print(
+            f"--report-json {config.report_json} exists and is not a vyupgrade report; "
+            "refusing to overwrite it",
             file=sys.stderr,
         )
         return 4

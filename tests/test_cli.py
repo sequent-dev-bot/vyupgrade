@@ -79,6 +79,127 @@ def __init__():
     assert any(fix["rule"] == "VY002" for fix in data["files"][0]["fixes"])
 
 
+LEGACY_CONTRACT = """# @version 0.3.10
+@external
+def __init__():
+    pass
+"""
+
+
+def test_report_json_refuses_input_contract(tmp_path: Path, failing_target_compiler) -> None:
+    contract = tmp_path / "Contract.vy"
+    contract.write_text(LEGACY_CONTRACT, encoding="utf-8")
+
+    code = main([str(contract), "--check", "--report-json", str(contract)])
+
+    assert contract.read_text(encoding="utf-8") == LEGACY_CONTRACT
+    assert code == 4
+
+
+def test_report_json_refuses_symlink_to_input_contract(
+    tmp_path: Path, passing_compiler
+) -> None:
+    contract = tmp_path / "Contract.vy"
+    contract.write_text(LEGACY_CONTRACT, encoding="utf-8")
+    link = tmp_path / "report.json"
+    link.symlink_to(contract)
+
+    code = main([str(contract), "--write", "--report-json", str(link)])
+
+    assert contract.read_text(encoding="utf-8") == LEGACY_CONTRACT
+    assert code == 4
+
+
+@pytest.mark.parametrize("source", ["", "\n\n"])
+@pytest.mark.parametrize("target_name", ["Empty.vy", "empty"])
+def test_report_json_refuses_symlink_to_blank_input_contract(
+    tmp_path: Path, failing_target_compiler, source: str, target_name: str
+) -> None:
+    target = tmp_path / target_name
+    target.write_text(source, encoding="utf-8")
+    contract = target
+    if target.suffix != ".vy":
+        contract = tmp_path / "Contract.vy"
+        contract.symlink_to(target)
+    link = tmp_path / "report.json"
+    link.symlink_to(target)
+
+    code = main([str(contract), "--check", "--report-json", str(link)])
+
+    assert target.read_text(encoding="utf-8") == source
+    assert code == 4
+
+
+def test_report_json_refuses_module_from_multiline_import(
+    tmp_path: Path, passing_compiler
+) -> None:
+    contract = tmp_path / "main.vy"
+    contract.write_text(
+        "# pragma version 0.4.3\nfrom . import (\n    lib,\n)\n", encoding="utf-8"
+    )
+    lib = tmp_path / "lib.vy"
+    lib.write_text(LEGACY_CONTRACT, encoding="utf-8")
+
+    code = main([str(contract), "--check", "--report-json", str(lib)])
+
+    assert lib.read_text(encoding="utf-8") == LEGACY_CONTRACT
+    assert code == 4
+
+
+@pytest.mark.parametrize(
+    "import_statement",
+    [
+        "import token_abi",
+        "from . import (\n    token_abi,\n)",
+        "from . import \\\n    token_abi",
+        "from . import(token_abi)",
+    ],
+)
+def test_report_json_refuses_imported_json_interface(
+    tmp_path: Path, passing_compiler, import_statement: str
+) -> None:
+    contract = tmp_path / "main.vy"
+    contract.write_text(f"# pragma version 0.4.3\n{import_statement}\n", encoding="utf-8")
+    interface = tmp_path / "token_abi.json"
+    interface.write_text("[]\n", encoding="utf-8")
+
+    code = main([str(contract), "--check", "--report-json", str(interface)])
+
+    assert interface.read_text(encoding="utf-8") == "[]\n"
+    assert code == 4
+
+
+def test_report_json_refuses_unreadable_file(tmp_path: Path, passing_compiler) -> None:
+    contract = tmp_path / "Contract.vy"
+    contract.write_text(LEGACY_CONTRACT, encoding="utf-8")
+    report = tmp_path / "report.json"
+    report.write_text("notes\n", encoding="utf-8")
+    report.chmod(0o200)
+
+    try:
+        code = main([str(contract), "--check", "--report-json", str(report)])
+    finally:
+        report.chmod(0o600)
+
+    assert report.read_text(encoding="utf-8") == "notes\n"
+    assert code == 4
+
+
+def test_report_json_replaces_earlier_report(tmp_path: Path, passing_compiler) -> None:
+    contract = tmp_path / "Contract.vy"
+    contract.write_text(LEGACY_CONTRACT, encoding="utf-8")
+    report = tmp_path / "report.json"
+
+    first = main([str(contract), "--check", "--report-json", str(report)])
+    first_report = report.read_text(encoding="utf-8")
+    second = main([str(contract), "--check", "--report-json", str(report)])
+
+    assert first in {1, 2}
+    assert second == first
+    assert json.loads(first_report)["producer"]["name"] == "vyupgrade"
+    assert json.loads(report.read_text(encoding="utf-8"))["producer"]["name"] == "vyupgrade"
+
+
 def test_write_mode_is_idempotent(tmp_path: Path, passing_compiler) -> None:
     contract = tmp_path / "migration_03.vy"
     contract.write_text(

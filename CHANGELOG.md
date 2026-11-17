@@ -23,6 +23,9 @@
   and the source compile is `degraded` instead of `failed`.
   `--allow-storage-layout-change` now also accepts a source whose only missing
   validation artifact is its storage layout.
+- `--report-json` no longer overwrites an existing file, such as an input
+  contract, an imported module or a symlink to one, unless it is an earlier
+  vyupgrade report; the run exits with status 4 instead.
 
 ## 0.10.0 - 2026-11-07
 
