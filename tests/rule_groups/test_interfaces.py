@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from vyupgrade.rules import apply_rules
 
 
@@ -652,12 +654,19 @@ def f(eta: uint256):
     assert "eta + _GRACE_PERIOD" in result.source
 
 
-def test_local_interface_nonpayable_matches_view_function(config) -> None:
-    source = """# @version 0.3.10
-interface Bucket:
+@pytest.mark.parametrize(
+    ("header", "implements"),
+    [
+        ("interface Bucket:", "implements: Bucket"),
+        ("interface Bucket :", "implements : Bucket"),
+    ],
+)
+def test_local_interface_nonpayable_matches_view_function(config, header, implements) -> None:
+    source = f"""# @version 0.3.10
+{header}
     def above_floor() -> bool: nonpayable
 
-implements: Bucket
+{implements}
 
 @external
 @view
@@ -669,6 +678,28 @@ def above_floor() -> bool:
 
     assert "def above_floor() -> bool: view" in result.source
     assert any(fix.rule == "VY014" for fix in result.fixes)
+
+
+def test_local_interface_nonpayable_kept_when_not_implemented(config) -> None:
+    source = """# @version 0.3.10
+interface Remote:
+    def ping() -> uint256: nonpayable
+
+@external
+@view
+def ping() -> uint256:
+    return 1
+
+@external
+def call_remote(target: address) -> uint256:
+    return Remote(target).ping()
+"""
+
+    result = apply_rules(source, config())
+
+    assert "def ping() -> uint256: nonpayable" in result.source
+    assert "extcall Remote(target).ping()" in result.source
+    assert not any(fix.rule == "VY014" for fix in result.fixes)
 
 
 def test_local_interface_nonpayable_matches_public_getter(config) -> None:
