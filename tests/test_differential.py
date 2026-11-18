@@ -334,6 +334,15 @@ def test_legacy_loop_types_come_from_the_source_compiler(tmp_path):
     source = """# @version 0.2.15
 MAX_COINS: constant(int128) = 8
 WIDTH: constant(uint256) = 8
+PAIR: constant(int128) = 2
+
+@external
+@pure
+def listed(x: uint256) -> uint256:
+    total: uint256 = 0
+    for i in [PAIR, 3]:
+        total += x * i
+    return total
 
 @external
 @pure
@@ -379,12 +388,14 @@ def offset(start: uint256) -> uint256:
     assert "for i: uint256 in range(convert(MAX_COINS, uint256), bound=8):" in migrated_source
     assert "for i: int256 in range(convert(MAX_COINS, int256), bound=8):" in migrated_source
     assert "for i: int256 in range(convert(WIDTH, int256), bound=8):" in migrated_source
+    assert "for i: uint256 in [convert(PAIR, uint256), 3]:" in migrated_source
     original = _deploy(path, source, "0.2.15")
     migrated = _deploy(path, migrated_source, "0.4.3")
     calls = [
         *(("narrowed(uint256,uint256,uint256)", 0xAB, n, k) for n in (0, 1, 3, 8) for k in (0, 2)),
         ("signed(uint256)", 0xABCDEF),
         ("signed_wide(uint256)", 0xABCDEF),
+        ("listed(uint256)", 5),
         *(("offset(uint256)", start) for start in (0, 3, 7, 8)),
     ]
     for signature, *args in calls:
@@ -392,11 +403,11 @@ def offset(start: uint256) -> uint256:
         assert outcomes[0] == outcomes[1], (signature, args, outcomes)
 
 
-def test_legacy_loops_stay_untyped_without_source_compiler_evidence(tmp_path):
+@pytest.mark.parametrize("pragma", ["# @version 0.2.15\n", ""])
+def test_legacy_loops_stay_untyped_without_source_compiler_evidence(tmp_path, pragma):
     # An explicit source executable reports no loop types, and source text cannot
-    # tell which type 0.2.15 gave this loop variable.
-    source = """# @version 0.2.15
-MAX_COINS: constant(int128) = 8
+    # tell which type 0.2.15 gave a loop over folded constants. A typed start can.
+    source = pragma + """MAX_COINS: constant(int128) = 8
 
 @external
 @pure
@@ -407,6 +418,14 @@ def narrowed(x: uint256, n: uint256) -> uint256:
             break
         packed += shift(x, convert(i * 8, int128))
     return packed
+
+@external
+@pure
+def offset(start: uint256) -> uint256:
+    total: uint256 = 0
+    for i in range(start, start + 2):
+        total += i
+    return total
 """
     command, _ = compiler._prepare_command(None, "0.2.15", None)
     executable = tmp_path / "vyper-0.2.15"
@@ -419,7 +438,7 @@ def narrowed(x: uint256, n: uint256) -> uint256:
     rewrite = batch.files[0].rewrite
 
     assert "    for i in range(MAX_COINS):" in rewrite.source
-    assert not any(fix.rule == "VY070" for fix in rewrite.fixes)
+    assert "    for i: uint256 in range(start, start + 2, bound=2):" in rewrite.source
 
 
 def test_internal_guard_rejects_reentrant_callback(tmp_path):

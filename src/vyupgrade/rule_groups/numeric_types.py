@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from ..analysis import unwrap_type
+from ..analysis import normalize_type, unwrap_type
 
 
 def is_unsigned_integer_type(type_name: str | None) -> bool:
@@ -36,7 +36,7 @@ def same_integer_signedness(left: str | None, right: str | None) -> bool:
 
 
 def integer_value_fits_type(value: int, type_name: str) -> bool:
-    match = re.fullmatch(r"(u?)int(\d+)", unwrap_type(type_name))
+    match = re.fullmatch(r"(u?)int(\d+)", normalize_type(type_name))
     if match is None:
         return False
     bits = int(match.group(2))

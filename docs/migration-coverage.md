@@ -243,11 +243,18 @@ modern Python interpreter.
   `min_value(...)` or `max_value(...)`, and folds exponent max literals inside
   `bytes32` conversions.
 - Range bounds are type-checked against annotated loop variables: `VY056`
-  converts signed integer constants inside `range(...)` when the loop variable
-  has an unsigned integer annotation, and adds a literal `bound=` when the
-  original constant expression makes the iteration count provable.
+  converts integer names inside `range(...)` whose type differs from the loop
+  variable's annotation: signed and narrower unsigned names, and, for a signed
+  loop variable, a `uint256` constant whose value fits. Attributes such as
+  `s.N` are left alone. It adds a literal `bound=` when the original constant
+  expression makes the iteration count provable.
 - Struct literals require keyword arguments: `VY060`.
-- Loop variables require type annotations: `VY070`.
+- Loop variables require type annotations: `VY070`. Before 0.3.2 the compiler
+  folded constants into untyped literals and typed a loop variable by its
+  body, so a loop over literals and constants takes the type the source
+  compiler reports, converting list constants of another type. Without that
+  report (an explicit `--source-vyper` executable, a failed source compile)
+  such a loop is left unannotated for the target compiler to reject.
 - `enum` replaced by `flag`: `VY030` diagnoses by default and rewrites only
   with `--aggressive`.
 - Builtin constants removed: `VY012` rewrites `MAX_UINT256`, integer min/max

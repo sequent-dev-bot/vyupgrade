@@ -419,9 +419,13 @@ class CompilerFacts:
     annotated_ast: dict[str, Any] | None = None
     external_calls: dict[str, Any] | None = None
     loop_types: dict[str, Any] | None = None
+    # The version of the compiler that accepted the source, when one did.
+    source_compiler: str | None = None
 
     @classmethod
-    def from_artifacts(cls, artifacts: dict[str, object] | None) -> CompilerFacts:
+    def from_artifacts(
+        cls, artifacts: dict[str, object] | None, source_compiler: str | None = None
+    ) -> CompilerFacts:
         def output(name: str) -> dict[str, Any] | None:
             value = artifacts.get(name) if artifacts else None
             return value if isinstance(value, dict) else None
@@ -431,6 +435,7 @@ class CompilerFacts:
             output("annotated_ast"),
             output("external_calls_v1"),
             output("loop_types_v1"),
+            source_compiler,
         )
 
 

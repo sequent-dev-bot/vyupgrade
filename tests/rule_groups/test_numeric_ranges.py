@@ -773,7 +773,8 @@ def test_legacy_loop_types_ignore_evidence_that_does_not_line_up(config) -> None
         result = apply_rules(LEGACY_LOOPS, config(target_version="0.4.3"), compiler_facts=facts)
         assert "    for i in range(MAX_COINS):" in result.source
         assert "    for j in range(MAX_COINS):" in result.source
-        assert not any(fix.rule == "VY070" for fix in result.fixes)
+        # A typed start fixes the type of the third loop variable.
+        assert "    for k: uint256 in range(start, start + " in result.source
 
 
 def test_legacy_loop_types_line_up_past_a_multiline_header(config) -> None:
@@ -820,3 +821,37 @@ def f(s: S) -> int256:
 
     assert "for i: int256 in range(s.N, s.N + 8" in result.source
     assert "convert(N" not in result.source
+
+
+def test_legacy_loop_types_line_up_past_a_parenthesized_target(config) -> None:
+    source = LEGACY_LOOPS.replace(
+        "    total: uint256 = 0\n",
+        "    total: uint256 = 0\n    for (q) in range(3):\n        total += q\n",
+    )
+    loops = [
+        {"line": line, "column": 4, "name": name, "type": type_name}
+        for line, name, type_name in (
+            (8, "q", "uint256"), (10, "i", "uint256"), (14, "j", "int256"), (16, "k", "uint256")
+        )
+    ]
+    facts = CompilerFacts(
+        loop_types={"source_sha256sum": compiler_source_sha256(source), "loops": loops}
+    )
+
+    result = apply_rules(source, config(target_version="0.4.3"), compiler_facts=facts)
+
+    assert "for i: uint256 in range(convert(MAX_COINS, uint256), bound=8):" in result.source
+    assert "for j: int256 in range(convert(MAX_COINS, int256), bound=8):" in result.source
+
+
+def test_legacy_loop_type_comes_from_the_resolved_source_compiler(config) -> None:
+    source = LEGACY_LOOPS.removeprefix("# @version 0.2.15\n")
+    unknown = apply_rules(source, config(target_version="0.4.3"))
+    legacy = apply_rules(
+        source,
+        config(target_version="0.4.3"),
+        compiler_facts=CompilerFacts(source_compiler="0.2.15"),
+    )
+
+    assert "for i: int128 in range(MAX_COINS):" in unknown.source
+    assert "    for i in range(MAX_COINS):" in legacy.source

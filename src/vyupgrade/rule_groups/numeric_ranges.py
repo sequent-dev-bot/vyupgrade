@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import io
 import re
+import tokenize
+import unicodedata
 from dataclasses import dataclass
 
 from ..ast_facts import CompilerSource
@@ -19,6 +22,7 @@ from ..rule_helpers import (
 )
 from ..rule_registry import Rule, RuleContext, crossing
 from ..source import (
+    lone_cr_as_lf,
     TextEdit,
     apply_edits,
     find_matching,
@@ -27,6 +31,7 @@ from ..source import (
     split_top_level_args,
     span_is_code,
 )
+from ..versions import ensure_version, parse_version
 from .numeric_types import (
     is_signed_integer_type as _is_signed_integer_type,
     is_unsigned_integer_type as _is_unsigned_integer_type,
@@ -50,24 +55,19 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
         r"^([ \t]*)for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in[ \t]+(.+?):", re.MULTILINE
     )
     inferred_loop_types: dict[int, str] = {}
-    # Every loop statement, headers spanning several lines included, to line up with
-    # the source compiler's evidence; only single-line headers are rewritten.
-    statements = [
-        match
-        for match in re.finditer(r"^[ \t]*for[ \t]+([A-Za-z_][A-Za-z0-9_]*)\b", source, re.MULTILINE)
-        if _line_match_starts_outside_string(source, mask, match.start())
-    ]
-    source_types = _source_loop_types(rule_context, [match.group(1) for match in statements])
+    statements = _loop_statements(source)
+    source_types = (
+        _source_loop_types(rule_context, [name for _start, name in statements])
+        if statements is not None
+        else None
+    )
     statement_types = (
-        {match.start(): type_name for match, type_name in zip(statements, source_types, strict=True)}
-        if source_types is not None
+        {start: type_name for (start, _name), type_name in zip(statements, source_types, strict=True)}
+        if statements is not None and source_types is not None
         else {}
     )
-    # Before 0.3.2 the compiler types an unannotated loop variable by its body, so
-    # source text cannot tell which integer type it had.
-    legacy_source = rule_context.migration.source_floor is not None and (
-        rule_context.migration.crosses("0.3.2")
-    )
+    types_by_body = _types_loops_by_body(rule_context)
+    constant_values = integer_constant_values(source, rule_context.compiler_facts.ast)
 
     for match in pattern.finditer(source):
         if not _line_match_starts_outside_string(source, mask, match.start()):
@@ -85,20 +85,24 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
             annotated_iterable = flag_member_list.replacement
         elif not guessed:
             var_type = source_type
-            annotated_iterable = iterable
+            annotated_iterable = (
+                _literal_list_as(iterable, var_type, vars_for_line, constant_values)
+                if iterable.startswith("[")
+                else iterable
+            )
         else:
             var_type = _loop_var_type(iterable, vars_for_line, facts)
             annotated_iterable = iterable
-        if var_type is None:
+        if var_type is None or annotated_iterable is None:
             continue
         if (
             guessed
-            and legacy_source
+            and types_by_body
             and is_integer_type(var_type)
-            and (re.match(r"range\s*\(", iterable) or iterable.startswith("["))
+            and _folds_to_literals(iterable, constant_values)
         ):
-            # Leave it for the target compiler to reject rather than guess a type
-            # that may change the loop's arithmetic.
+            # Its compiler typed this loop variable by the loop body, which source text
+            # cannot predict: leave it for the target compiler to reject.
             continue
         if guessed and var_type == "uint256" and _range_iterable_has_literal_bounds(iterable):
             var_type = _narrow_unsigned_range_loop_operand_type(
@@ -123,6 +127,101 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
         inferred_loop_types[line] = var_type
 
     return apply_edits(source, edits), fixes, []
+
+
+def _loop_statements(source: str) -> list[tuple[int, str]] | None:
+    """Each loop statement's line start offset and loop variable name, in source order.
+
+    Uses Python's tokenizer so that parenthesized targets and headers spanning several
+    lines are found like the compiler finds them. ``None`` if the source does not
+    tokenize or a target is not a single name.
+    """
+    text = lone_cr_as_lf(source)
+    rows = [0, *(match.end() for match in re.finditer("\n", text))]
+    statements: list[tuple[int, str]] = []
+    target: list[tokenize.TokenInfo] | None = None
+    target_row = 0
+    at_statement_start = True
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if target is not None:
+                if token.type == tokenize.NAME and token.string == "in":
+                    names = [
+                        part
+                        for part in target
+                        if part.type not in (tokenize.NL, tokenize.COMMENT)
+                        and part.string not in ("(", ")")
+                    ]
+                    if any(part.string == ":" for part in names):
+                        names = names[: [part.string for part in names].index(":")]
+                    if len(names) != 1 or names[0].type != tokenize.NAME:
+                        return None
+                    statements.append((target_row, unicodedata.normalize("NFKC", names[0].string)))
+                    target = None
+                else:
+                    target.append(token)
+                continue
+            if token.type in (tokenize.NL, tokenize.COMMENT):
+                continue
+            if at_statement_start and token.type == tokenize.NAME and token.string == "for":
+                target_row = rows[token.start[0] - 1]
+                target = []
+            at_statement_start = token.type in (
+                tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT
+            )
+    except (tokenize.TokenError, SyntaxError):
+        return None
+    return statements
+
+
+def _types_loops_by_body(rule_context: RuleContext) -> bool:
+    """Whether the source compiler typed unannotated loop variables by their body.
+
+    Before 0.3.2 it folds constants into untyped literals first. The compiler that
+    accepted the file decides; the pragma's floor stands in when it is unknown.
+    """
+    version = parse_version(rule_context.compiler_facts.source_compiler)
+    if version is None:
+        version = rule_context.migration.source_floor
+    return version is not None and version < ensure_version("0.3.2")
+
+
+def _folds_to_literals(iterable: str, constant_values: dict[str, int]) -> bool:
+    """Whether a range's arguments or a list's elements are only literals and constants."""
+    if re.match(r"range\s*\(", iterable) and iterable.endswith(")"):
+        inner = iterable[iterable.index("(") + 1 : -1]
+    elif iterable.startswith("[") and iterable.endswith("]"):
+        inner = iterable[1:-1]
+    else:
+        return False
+    return all(name in constant_values for name in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*", inner))
+
+
+def _literal_list_as(
+    iterable: str, var_type: str, vars_for_line: dict[str, str], constant_values: dict[str, int]
+) -> str | None:
+    """A literal list whose elements have the loop variable's type, or ``None``.
+
+    Before 0.3.2 constants in the list folded to literals the loop type accepted, so a
+    constant of another integer type is converted; other mismatches are left alone.
+    """
+    if not iterable.endswith("]"):
+        return None
+    elements = split_top_level_args(iterable[1:-1])
+    if elements is None:
+        return None
+    converted = []
+    for raw_element in elements:
+        element = raw_element.strip()
+        names = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*", element)
+        types = {normalize_type(vars_for_line.get(name) or "") for name in names}
+        if not names or types == {var_type}:
+            converted.append(element)
+        elif len(types) == 1 and all(name in constant_values for name in names):
+            converted.append(f"convert({element}, {var_type})")
+        else:
+            return None
+    return f"[{', '.join(converted)}]"
 
 
 def _source_loop_types(rule_context: RuleContext, names: list[str]) -> list[str] | None:

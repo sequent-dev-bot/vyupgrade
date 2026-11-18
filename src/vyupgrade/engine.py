@@ -200,8 +200,10 @@ def prepare_migrations(
             attempt.compiler_label if attempt is not None else None
         )
         file_config = replace(config, source_version=source_version, source_ast=None)
+        compiled = source_compile.status in {"passed", "degraded"}
         facts = CompilerFacts.from_artifacts(
-            source_compile.artifacts if source_compile.status in {"passed", "degraded"} else None
+            source_compile.artifacts if compiled else None,
+            source_compile.resolved_compiler if compiled else None,
         )
         interface_wildcards = wildcard_plans.get(request.path.resolve())
         if interface_wildcards is None:
