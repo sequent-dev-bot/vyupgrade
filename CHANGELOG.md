@@ -22,6 +22,10 @@
   interfaces no longer blocks `VY125` wildcards: like a pre-0.4 root, it cannot
   call through a captured interface, though only 0.4.3 compiles give module
   evidence.
+- Leave a comparison between a signed integer and an integer literal that
+  fits its type unconverted (`VY052`). It used to cast the signed operand to
+  `uint256`, so the migrated contract reverted whenever that operand was
+  negative.
 
 ## 0.11.0 - 2026-11-18
 
