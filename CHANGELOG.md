@@ -8,9 +8,10 @@
   negative.
 - Read a signed name's comparison peer and unsigned context from the clause
   that holds it, not from the whole line (`VY052`). An unsigned name or a
-  literal in another `and`/`or` clause, a ternary branch or the assignment
-  target no longer casts a signed operand to `uint256`, which made the
-  migrated contract revert on negative values.
+  literal in another `and`/`or` clause or a ternary condition, an enclosing
+  array index or the assignment target no longer casts a signed comparison
+  operand to `uint256`, which made the migrated contract revert on negative
+  values.
 
 ## 0.11.0 - 2026-11-18
 

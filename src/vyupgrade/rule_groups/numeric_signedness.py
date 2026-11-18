@@ -456,6 +456,7 @@ def _mixed_signed_unsigned_arithmetic(
                     or inside_convert_call(source, start)
                     or _inside_type_subscript(source, start)
                     or not _inside_array_subscript(source, start, vars_for_line)
+                    or _clause_at(source, start).compares
                 ):
                     continue
                 replacement = f"convert({name}, uint256)"
@@ -997,10 +998,11 @@ def _signed_name_has_unsigned_context(
         and _is_unsigned_integer_type(vars_for_line.get(peer))
     ):
         return False
-    # A comparison's operands take each other's type, not the assignment target's.
-    if _is_unsigned_integer_type(lhs_type) and not clause.compares:
-        return True
-    if _inside_array_subscript(line, index, vars_for_line):
+    # A comparison's operands take each other's type, not the type the
+    # assignment target or an enclosing array index expects.
+    if clause.compares:
+        return _has_unsigned_context(clause.text, vars_for_line)
+    if _is_unsigned_integer_type(lhs_type) or _inside_array_subscript(line, index, vars_for_line):
         return True
     return _has_unsigned_context(clause.text, vars_for_line)
 
@@ -1161,8 +1163,9 @@ def _unsigned_comparison_target_type_at(
 
 
 _COMPARISON_OPERATORS = frozenset({"==", "!=", "<=", ">=", "<", ">"})
-# Integer arithmetic on decimal and octal literals only.
-_LITERAL_EXPRESSION = re.compile(r"(?:\s|[-+*/%()]|\d(?:_?\d)*|0[oO](?:_?[0-7])+)+")
+# Integer arithmetic on decimal and octal literals only; what else it lets
+# through doesn't evaluate.
+_LITERAL_EXPRESSION = re.compile(r"[\d_oO\s()+\-*/%]+")
 # Tokens that bind less tightly than a comparison, so a comparison operand
 # starts right after one or ends right before one.
 _OPERAND_OPENERS = frozenset(
@@ -1218,7 +1221,8 @@ _CLOSERS = frozenset({")", "]", "}"})
 class _Clause:
     """The comparison or arithmetic operand that holds a name: what lies
     between the nearest lower-precedence tokens around it, within its
-    enclosing call, subscript, list or struct brackets."""
+    enclosing call, subscript, list or struct brackets. Its text leaves out
+    the conditions of ternaries nested in it, which type nothing in it."""
 
     text: str
     compares: bool
@@ -1238,8 +1242,36 @@ def _clause_at(source: str, start: int) -> _Clause:
         # Parentheses that only group an operand, as in `(i + 1) == 2`, are
         # part of the enclosing clause.
         if compares or not _grouping_parentheses(texts, first - 1, last + 1):
-            return _Clause(_statement_text(tokens[first : last + 1]), compares=compares)
+            runs = _without_ternary_conditions(tokens[first : last + 1])
+            return _Clause(" ".join(_statement_text(run) for run in runs), compares=compares)
         first, last = first - 1, last + 1
+
+
+def _without_ternary_conditions(
+    tokens: list[tokenize.TokenInfo],
+) -> list[list[tokenize.TokenInfo]]:
+    """The runs of ``tokens`` left after cutting each nested ternary's
+    ``if <condition> else``."""
+    runs: list[list[tokenize.TokenInfo]] = [[]]
+    conditions: list[int] = []  # bracket depth of each `if` whose `else` is pending
+    depth = 0
+    for token in tokens:
+        text = token.string
+        if text in _OPENERS:
+            depth += 1
+        elif text in _CLOSERS:
+            depth -= 1
+        elif text == "if":
+            conditions.append(depth)
+            continue
+        elif text == "else" and conditions and conditions[-1] == depth:
+            conditions.pop()
+            if not conditions:
+                runs.append([])
+            continue
+        if not conditions:
+            runs[-1].append(token)
+    return [run for run in runs if run]
 
 
 def _clause_edge(texts: list[str], position: int, step: int) -> int:
@@ -1255,7 +1287,12 @@ def _clause_edge(texts: list[str], position: int, step: int) -> int:
             if depth == 0:
                 return position
             depth -= 1
-        elif depth == 0 and text in _CLAUSE_BOUNDARIES:
+        elif (
+            depth == 0
+            and text in _CLAUSE_BOUNDARIES
+            # `not in` is one comparison operator.
+            and not (text == "not" and _token_at(texts, position + step + 1) == "in")
+        ):
             return position
         position += step
     return position
@@ -1268,7 +1305,7 @@ def _has_top_level_comparison(texts: list[str]) -> bool:
             depth += 1
         elif text in _CLOSERS:
             depth -= 1
-        elif depth == 0 and text in _COMPARISON_OPERATORS:
+        elif depth == 0 and (text in _COMPARISON_OPERATORS or text == "in"):
             return True
     return False
 

@@ -345,6 +345,98 @@ def f(n: uint256, x: uint256) -> uint256:
             assert _outcome(deployment, "f(uint256,uint256)", *args) == expected
 
 
+def test_unsigned_constant_takes_the_signed_peer_of_its_own_clause(tmp_path):
+    # 0.2 folds constants before type checking, so `N == y` compiles there.
+    deployments = _migration_pair(tmp_path, """# @version 0.2.16
+N: constant(uint256) = 2
+
+@external
+@pure
+def f(x: uint256, y: int128) -> uint256:
+    count: uint256 = 0
+    if N == y or N > x:
+        count += 1
+    if N > x or N == y:
+        count += 2
+    return count
+""")
+    for args, expected in (((5, -1), 0), ((5, 2), 3), ((0, -1), 3)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256,int128)", *args) == expected
+
+
+def test_signed_cleanup_keeps_the_cast_against_a_ternary_with_a_signed_condition(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(x: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if (convert(i, uint256) == (1 if convert(x, int256) > 0 else 2)):
+            count += 1
+    return count
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f(uint256)", 1) == "revert"
+
+
+def test_unsigned_name_in_a_nested_ternary_condition_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@internal
+@pure
+def g(a: uint256, b: uint256) -> bool:
+    return b > a
+
+@external
+@pure
+def f(x: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i + 1 == (1 if self.g(0, x) else 2):
+            count += 1
+        if i + (1 if x > 0 else 2) == 2:
+            count += 1
+    return count
+""")
+    for x in (0, 5):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256)", x) == 2
+
+
+def test_signed_comparison_inside_array_index_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+a: uint256[2]
+
+@external
+def f() -> uint256:
+    self.a[0] = 5
+    self.a[1] = 10
+    total: uint256 = 0
+    for i in range(-1, 3):
+        total += self.a[0 if i + 1 == 2 else 1]
+    return total
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 35
+
+
+def test_signed_membership_test_with_unsigned_target_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f() -> uint256:
+    total: uint256 = 0
+    for i in range(-1, 3):
+        y: uint256 = 2 if i + 1 in [0, 1] else 1
+        total += y
+        y = 2 if i + 1 not in [0, 1] else 1
+        total += y
+    return total
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 12
+
+
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])
 def test_tuple_assignment_preserves_signed_membership(tmp_path, index):
     deployments = _migration_pair(tmp_path, f"""# @version 0.3.10
