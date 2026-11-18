@@ -9,9 +9,12 @@
   `int256`; taking `int128` from the constant made a narrowing
   `convert(i * 8, int128)` a same-type conversion the target rejected. A
   degraded source compile (no layout before 0.2.16) now keeps its rewrite
-  evidence.
+  evidence. Without that evidence (an explicit `--source-vyper` executable, a
+  failed source compile), such range and literal-list loops are left
+  unannotated for the target compiler to reject rather than guessed.
 - Convert a constant range bound to a signed loop variable's type too
-  (`VY056`), and stop casting an unsigned loop variable to a signed constant's
+  (`VY056`), including a `uint256` constant whose value fits, but never an
+  attribute such as `s.N` that shares a constant's name; and stop casting an unsigned loop variable to a signed constant's
   type in comparisons such as `x + 1 == N`, where the constant is already cast
   to the loop variable's type.
 

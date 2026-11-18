@@ -1,5 +1,6 @@
 """Execute the actual source and migrated bytecode in independent local EVMs."""
 import itertools
+import shlex
 from pathlib import Path
 
 import pytest
@@ -332,6 +333,7 @@ def test_legacy_loop_types_come_from_the_source_compiler(tmp_path):
     # uint256, int256 and int128 that its body accepts, not the constant's int128.
     source = """# @version 0.2.15
 MAX_COINS: constant(int128) = 8
+WIDTH: constant(uint256) = 8
 
 @external
 @pure
@@ -353,6 +355,14 @@ def signed(x: uint256) -> uint256:
 
 @external
 @pure
+def signed_wide(x: uint256) -> uint256:
+    total: uint256 = 0
+    for i in range(WIDTH):
+        total += shift(x, -8 * i) % 256
+    return total
+
+@external
+@pure
 def offset(start: uint256) -> uint256:
     count: uint256 = 0
     for x in range(start, start + MAX_COINS):
@@ -368,16 +378,48 @@ def offset(start: uint256) -> uint256:
     migrated_source = batch.files[0].rewrite.source
     assert "for i: uint256 in range(convert(MAX_COINS, uint256), bound=8):" in migrated_source
     assert "for i: int256 in range(convert(MAX_COINS, int256), bound=8):" in migrated_source
+    assert "for i: int256 in range(convert(WIDTH, int256), bound=8):" in migrated_source
     original = _deploy(path, source, "0.2.15")
     migrated = _deploy(path, migrated_source, "0.4.3")
     calls = [
         *(("narrowed(uint256,uint256,uint256)", 0xAB, n, k) for n in (0, 1, 3, 8) for k in (0, 2)),
         ("signed(uint256)", 0xABCDEF),
+        ("signed_wide(uint256)", 0xABCDEF),
         *(("offset(uint256)", start) for start in (0, 3, 7, 8)),
     ]
     for signature, *args in calls:
         outcomes = [_outcome(deployment, signature, *args) for deployment in (original, migrated)]
         assert outcomes[0] == outcomes[1], (signature, args, outcomes)
+
+
+def test_legacy_loops_stay_untyped_without_source_compiler_evidence(tmp_path):
+    # An explicit source executable reports no loop types, and source text cannot
+    # tell which type 0.2.15 gave this loop variable.
+    source = """# @version 0.2.15
+MAX_COINS: constant(int128) = 8
+
+@external
+@pure
+def narrowed(x: uint256, n: uint256) -> uint256:
+    packed: uint256 = 0
+    for i in range(MAX_COINS):
+        if i == n:
+            break
+        packed += shift(x, convert(i * 8, int128))
+    return packed
+"""
+    command, _ = compiler._prepare_command(None, "0.2.15", None)
+    executable = tmp_path / "vyper-0.2.15"
+    executable.write_text(f"#!/bin/sh\nexec {shlex.join(command)} \"$@\"\n", encoding="utf-8")
+    executable.chmod(0o755)
+    path = tmp_path / "entry.vy"
+    path.write_text(source, encoding="utf-8")
+    config = Config(paths=(path,), target_version="0.4.3", source_vyper=str(executable))
+    batch = engine.prepare_migrations([engine.bounded_migration_request(path, source, config)], config)
+    rewrite = batch.files[0].rewrite
+
+    assert "    for i in range(MAX_COINS):" in rewrite.source
+    assert not any(fix.rule == "VY070" for fix in rewrite.fixes)
 
 
 def test_internal_guard_rejects_reentrant_callback(tmp_path):

@@ -50,21 +50,35 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
         r"^([ \t]*)for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in[ \t]+(.+?):", re.MULTILINE
     )
     inferred_loop_types: dict[int, str] = {}
-    loops = [
+    # Every loop statement, headers spanning several lines included, to line up with
+    # the source compiler's evidence; only single-line headers are rewritten.
+    statements = [
         match
-        for match in pattern.finditer(source)
+        for match in re.finditer(r"^[ \t]*for[ \t]+([A-Za-z_][A-Za-z0-9_]*)\b", source, re.MULTILINE)
         if _line_match_starts_outside_string(source, mask, match.start())
     ]
-    source_types = _source_loop_types(rule_context, [match.group(2) for match in loops])
+    source_types = _source_loop_types(rule_context, [match.group(1) for match in statements])
+    statement_types = (
+        {match.start(): type_name for match, type_name in zip(statements, source_types, strict=True)}
+        if source_types is not None
+        else {}
+    )
+    # Before 0.3.2 the compiler types an unannotated loop variable by its body, so
+    # source text cannot tell which integer type it had.
+    legacy_source = rule_context.migration.source_floor is not None and (
+        rule_context.migration.crosses("0.3.2")
+    )
 
-    for index, match in enumerate(loops):
+    for match in pattern.finditer(source):
+        if not _line_match_starts_outside_string(source, mask, match.start()):
+            continue
         iterable = match.group(3).strip()
         if ":" in source[match.start() : match.end()].split(" in ", 1)[0]:
             continue
         line = line_number(source, match.start())
         vars_for_line = facts.vars_at_line(line, inferred_loop_types)
         flag_member_list = _literal_flag_member_list(iterable, flag_member_values)
-        source_type = source_types[index] if source_types is not None else None
+        source_type = statement_types.get(match.start())
         guessed = not is_integer_type(source_type)
         if flag_member_list is not None:
             var_type = "uint256"
@@ -76,6 +90,15 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
             var_type = _loop_var_type(iterable, vars_for_line, facts)
             annotated_iterable = iterable
         if var_type is None:
+            continue
+        if (
+            guessed
+            and legacy_source
+            and is_integer_type(var_type)
+            and (re.match(r"range\s*\(", iterable) or iterable.startswith("["))
+        ):
+            # Leave it for the target compiler to reject rather than guess a type
+            # that may change the loop's arithmetic.
             continue
         if guessed and var_type == "uint256" and _range_iterable_has_literal_bounds(iterable):
             var_type = _narrow_unsigned_range_loop_operand_type(
@@ -110,7 +133,7 @@ def _source_loop_types(rule_context: RuleContext, names: list[str]) -> list[str]
     Before 0.3.2 the compiler folds constants into untyped literals and gives an unannotated
     loop variable the first candidate type its body accepts, which source text cannot predict.
     The evidence lists every loop in source order, so it applies only when the loop variable
-    names still line up one for one.
+    names of ``names``, every loop statement in the source, still line up one for one.
     """
     evidence = rule_context.compiler_facts.loop_types
     original = rule_context.original_source

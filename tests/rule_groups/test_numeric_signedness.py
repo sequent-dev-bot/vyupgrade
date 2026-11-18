@@ -26,7 +26,7 @@ def f():
 
 
 def test_signed_constant_converted_in_uint_arithmetic(config) -> None:
-    source = """# @version 0.2.8
+    source = """# @version 0.3.3
 N_COINS: constant(int128) = 3
 
 @external
@@ -100,7 +100,7 @@ def f(D: uint256):
 
 
 def test_signed_loop_variable_converted_in_uint_assignment(config) -> None:
-    source = """# @version 0.2.8
+    source = """# @version 0.3.3
 MAX_COINS: constant(int128) = 8
 
 @external
@@ -134,7 +134,7 @@ def f(flag: int128, end: uint256) -> bool:
 
 
 def test_signed_loop_index_converted_in_uint_index_arithmetic(config) -> None:
-    source = """# @version 0.2.8
+    source = """# @version 0.3.3
 MAX_COIN: constant(int128) = 1
 BASE_N_COINS: constant(int128) = 3
 
@@ -392,7 +392,7 @@ def f(_mint_num: uint256):
 
 
 def test_unsigned_loop_variable_converted_in_elif_signed_comparison(config) -> None:
-    source = """# @version 0.2.16
+    source = """# @version 0.3.3
 @external
 def f(j: int128, xp: uint256[3]) -> uint256:
     total: uint256 = 0
@@ -616,7 +616,7 @@ def f() -> int128[N_COINS]:
 
 
 def test_boolean_comparison_prefers_casting_unsigned_constant_peer(config) -> None:
-    source = """# @version 0.2.16
+    source = """# @version 0.3.3
 N_COINS: constant(int128) = 2
 ETH_INDEX: constant(uint256) = 0
 
@@ -652,7 +652,7 @@ def f(amount: uint256) -> DynArray[int256, 3]:
 
 
 def test_unsigned_range_loop_converted_in_signed_comparison(config) -> None:
-    source = """# @version 0.2.4
+    source = """# @version 0.3.3
 n_gauge_types: int128
 points_sum: HashMap[int128, uint256]
 
@@ -867,7 +867,7 @@ def f(i: int128) -> address:
 
 
 def test_signed_literal_cast_removed_from_unsigned_subscript_arithmetic(config) -> None:
-    source = """# @version 0.2.16
+    source = """# @version 0.3.3
 MAX_DISCOUNTS: constant(int8) = 10
 
 struct Discount:
@@ -920,7 +920,7 @@ def f(i: uint256, dx: uint256) -> uint256[N_STABLECOINS]:
 
 
 def test_unsigned_local_converted_inside_signed_external_arg_expression(config) -> None:
-    source = """# @version 0.2.16
+    source = """# @version 0.3.3
 interface CurvePool:
     def balances(i: int128) -> uint256: view
 
@@ -1040,7 +1040,7 @@ def wad_exp(r: int256, k: int256) -> int256:
 
 
 def test_signed_loop_index_casted_in_unsigned_subscript_arithmetic(config) -> None:
-    source = """# @version 0.2.16
+    source = """# @version 0.3.3
 N_COINS: constant(int128) = 2
 
 @external
@@ -1087,7 +1087,7 @@ def f(position: int256) -> uint256:
 
 
 def test_external_call_arg_uses_nearest_loop_type_for_reused_name(config) -> None:
-    source = """# @version 0.2.12
+    source = """# @version 0.3.3
 interface Curve:
     def balances(i: uint256) -> uint256: view
     def price_scale(i: uint256) -> uint256: view
@@ -1113,7 +1113,7 @@ def f(pool: address) -> uint256:
 
 
 def test_signed_loop_declaration_is_not_cast_when_name_reused_by_later_uint_loop(config) -> None:
-    source = """# @version 0.2.12
+    source = """# @version 0.3.3
 interface Curve:
     def balances(i: uint256) -> uint256: view
     def price_scale(i: uint256) -> uint256: view
@@ -1168,7 +1168,7 @@ def f(n_diff: int256) -> uint256:
 
 
 def test_signed_loop_type_is_not_overwritten_by_later_loop_same_name(config) -> None:
-    source = """# @version 0.2.4
+    source = """# @version 0.3.3
 N_COINS: constant(int128) = 2
 
 @external

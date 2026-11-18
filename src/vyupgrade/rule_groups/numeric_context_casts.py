@@ -33,6 +33,7 @@ from .numeric_casts import (
 )
 from .numeric_constant_helpers import constant_range_iteration_bound
 from .numeric_types import (
+    integer_value_fits_type,
     is_signed_integer_type as _is_signed_integer_type,
     is_unsigned_integer_type as _is_unsigned_integer_type,
 )
@@ -193,9 +194,18 @@ def _unsigned_range_bound_signed_constants(
             vars_for_line.items(), key=lambda item: len(item[0]), reverse=True
         ):
             normalized_type = normalize_type(type_name)
+            # Before 0.3.2 a constant folds to a literal, so a signed loop may take a
+            # uint256 constant bound whose value fits.
+            folded_constant = (
+                _is_signed_integer_type(loop_type)
+                and normalized_type == "uint256"
+                and name in constant_values
+                and integer_value_fits_type(constant_values[name], loop_type)
+            )
             if not (
                 _is_signed_integer_type(normalized_type)
                 or _is_narrow_unsigned_integer_type(normalized_type)
+                or folded_constant
             ):
                 continue
             if normalized_type == loop_type:
@@ -205,6 +215,9 @@ def _unsigned_range_bound_signed_constants(
                     start <= name_match.start() and name_match.end() <= end
                     for start, end, _arg in positional_spans
                 ):
+                    continue
+                if args[: name_match.start()].rstrip().endswith("."):
+                    # An attribute such as a struct field, not this name.
                     continue
                 start = args_start + name_match.start()
                 end = args_start + name_match.end()

@@ -33,3 +33,13 @@ def same_integer_signedness(left: str | None, right: str | None) -> bool:
     return (is_signed_integer_type(left) and is_signed_integer_type(right)) or (
         is_unsigned_integer_type(left) and is_unsigned_integer_type(right)
     )
+
+
+def integer_value_fits_type(value: int, type_name: str) -> bool:
+    match = re.fullmatch(r"(u?)int(\d+)", unwrap_type(type_name))
+    if match is None:
+        return False
+    bits = int(match.group(2))
+    if match.group(1):
+        return 0 <= value < 2**bits
+    return -(2 ** (bits - 1)) <= value < 2 ** (bits - 1)

@@ -478,7 +478,7 @@ def f(strategy: StrategyParams) -> StrategyParams:
 
 
 def test_struct_constructor_casts_integer_field_arguments(config) -> None:
-    source = """# @version 0.2.7
+    source = """# @version 0.3.3
 struct SwapData:
     pool: address
     coin: address

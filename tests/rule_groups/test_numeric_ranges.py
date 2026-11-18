@@ -134,7 +134,7 @@ def f() -> uint256:
 
 
 def test_loop_type_uses_nearest_loop_after_same_name_local_decl(config) -> None:
-    source = """# @version 0.2.16
+    source = """# @version 0.3.3
 MAX_COINS: constant(int128) = 4
 
 @external
@@ -769,7 +769,54 @@ def test_legacy_loop_types_ignore_evidence_that_does_not_line_up(config) -> None
     misnamed = _legacy_loop_facts(LEGACY_LOOPS, ["i", "k", "j"], ["uint256", "int256", "uint256"])
     stale = _legacy_loop_facts(LEGACY_LOOPS + "\n", ["i", "j", "k"], ["uint256", "int256", "uint256"])
 
-    for facts in (misnamed, stale):
+    for facts in (misnamed, stale, CompilerFacts()):
         result = apply_rules(LEGACY_LOOPS, config(target_version="0.4.3"), compiler_facts=facts)
-        assert "for i: int128 in range(MAX_COINS):" in result.source
-        assert "for j: int128 in range(MAX_COINS):" in result.source
+        assert "    for i in range(MAX_COINS):" in result.source
+        assert "    for j in range(MAX_COINS):" in result.source
+        assert not any(fix.rule == "VY070" for fix in result.fixes)
+
+
+def test_legacy_loop_types_line_up_past_a_multiline_header(config) -> None:
+    source = LEGACY_LOOPS.replace(
+        "    total: uint256 = 0\n",
+        "    total: uint256 = 0\n    for q in range(\n        3\n    ):\n        total += q\n",
+    )
+    loops = [
+        {"line": line, "column": 4, "name": name, "type": "uint256"}
+        for line, name in ((8, "q"), (12, "i"), (16, "j"), (18, "k"))
+    ]
+    loops[2]["type"] = "int256"
+    facts = CompilerFacts(
+        loop_types={"source_sha256sum": compiler_source_sha256(source), "loops": loops}
+    )
+
+    result = apply_rules(source, config(target_version="0.4.3"), compiler_facts=facts)
+
+    assert "for i: uint256 in range(convert(MAX_COINS, uint256), bound=8):" in result.source
+    assert "for j: int256 in range(convert(MAX_COINS, int256), bound=8):" in result.source
+
+
+def test_signed_range_bound_cast_skips_attributes(config) -> None:
+    source = """# @version 0.2.15
+struct S:
+    N: int256
+
+N: constant(int128) = 3
+
+@external
+@pure
+def f(s: S) -> int256:
+    total: int256 = 0
+    for i in range(s.N, s.N + 8):
+        total += i
+    return total
+"""
+    loops = [{"line": 11, "column": 4, "name": "i", "type": "int256"}]
+    facts = CompilerFacts(
+        loop_types={"source_sha256sum": compiler_source_sha256(source), "loops": loops}
+    )
+
+    result = apply_rules(source, config(target_version="0.4.3"), compiler_facts=facts)
+
+    assert "for i: int256 in range(s.N, s.N + 8" in result.source
+    assert "convert(N" not in result.source
