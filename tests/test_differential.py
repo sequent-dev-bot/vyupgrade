@@ -548,6 +548,90 @@ def f(s: int256, x: uint256) -> int8:
             assert _outcome(deployment, "f(int256,uint256)", *args) == expected
 
 
+def test_signed_comparison_with_literal_min_max_peer_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f() -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i == min(2, 3):
+            count += 1
+        if (i <
+                max(1, 2) + 1):
+            count += 10
+    return count
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 41
+
+
+def test_signed_membership_list_element_with_unsigned_target_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f() -> uint256:
+    total: uint256 = 0
+    for i in range(-1, 3):
+        y: uint256 = 2 if 1 in [i, 1] else 1
+        total += y
+    return total
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 8
+
+
+def test_unsigned_loop_index_as_shift_amount_stays_unsigned(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(s: int256) -> uint256:
+    count: uint256 = 0
+    for k in range(3):
+        if s == 1 << k:
+            count += 1
+        if (s ==
+                1 << k):
+            count += 10
+    return count
+""")
+    for args, expected in (((2,), 11), ((3,), 0), ((-1,), 0)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(int256)", *args) == expected
+
+
+def test_signed_constant_beside_unsigned_max_argument_keeps_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.2.16
+C: constant(int128) = 2
+
+@external
+@view
+def f(x: uint256) -> uint256:
+    if C + max(x, 0) > 0:
+        return 1
+    return 0
+""")
+    for args, expected in (((0,), 1), ((5,), 1)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256)", *args) == expected
+
+
+def test_variable_named_like_the_conversion_placeholder_keeps_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(_: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i + convert(_, int256) == 2:
+            count += 1
+    return count
+""")
+    for args, expected in (((0,), 1), ((1,), 1), ((5,), 0)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256)", *args) == expected
+
+
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])
 def test_tuple_assignment_preserves_signed_membership(tmp_path, index):
     deployments = _migration_pair(tmp_path, f"""# @version 0.3.10

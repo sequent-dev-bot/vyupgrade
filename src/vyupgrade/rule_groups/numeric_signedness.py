@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import keyword
 import re
 import tokenize
@@ -217,6 +218,8 @@ def _mixed_signed_unsigned_arithmetic(
                     or inside_convert_call(source, start)
                     or _inside_loop_declaration(source, start, end)
                     or _inside_range_header(source, start)
+                    # A shift amount stays unsigned.
+                    or _inside_shift_operator_amount(source, start)
                     or _unsigned_external_call_arg_context(source, start, name, facts, vars_for_line)
                 ):
                     continue
@@ -300,6 +303,7 @@ def _mixed_signed_unsigned_arithmetic(
                     or _inside_loop_declaration(source, start, end)
                     or _inside_range_header(source, start)
                     or _inside_type_subscript(source, start)
+                    or _inside_shift_operator_amount(source, start)
                     or (_is_unsigned_integer_type(lhs_type) and call_target is None)
                     or (_unsigned_internal_call_arg_context(source, start, facts) and call_target is None)
                     or (
@@ -1078,7 +1082,7 @@ def _unsigned_comparison_target_type_at(
     other = _comparison_peer(_clause_at(source, index).text, name)
     if other is None:
         return None
-    value = eval_integer_constant_expr(other, {}) if _LITERAL_EXPRESSION.fullmatch(other) else None
+    value = _literal_value(other)
     if value is not None:
         # A literal takes the other operand's type when its value fits it.
         if _integer_value_fits_type(value, vars_for_line.get(name) or ""):
@@ -1092,6 +1096,33 @@ def _unsigned_comparison_target_type_at(
         return None
     other_type = infer_expr_type(other, vars_for_line, facts)
     return normalize_type(other_type) if _is_unsigned_integer_type(other_type) else None
+
+
+def _literal_value(expr: str) -> int | None:
+    """The value of an integer expression of literals, arithmetic on them
+    and `min`/`max` over them, which compile to a literal."""
+    try:
+        tree = ast.parse(expr.strip(), mode="eval")
+    except SyntaxError:
+        return None
+    text = ast.unparse(_LiteralMinMaxFolder().visit(tree))
+    return eval_integer_constant_expr(text, {}) if _LITERAL_EXPRESSION.fullmatch(text) else None
+
+
+class _LiteralMinMaxFolder(ast.NodeTransformer):
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if not (
+            isinstance(node.func, ast.Name)
+            and node.func.id in ("min", "max")
+            and len(node.args) == 2
+            and not node.keywords
+        ):
+            return node
+        values = [_literal_value(ast.unparse(argument)) for argument in node.args]
+        if None in values:
+            return node
+        return ast.Constant((min if node.func.id == "min" else max)(values))
 
 
 _COMPARISON_OPERATORS = frozenset({"==", "!=", "<=", ">=", "<", ">"})
@@ -1173,7 +1204,11 @@ def _clause_at(source: str, start: int) -> _Clause:
     while True:
         first = _clause_edge(texts, first, -1)
         last = _clause_edge(texts, last, 1)
-        compares = _has_top_level_comparison(texts[first : last + 1])
+        # An element of the list a membership test searches takes the type
+        # of what it is compared with.
+        compares = _has_top_level_comparison(texts[first : last + 1]) or (
+            _token_at(texts, first - 1) == "[" and _token_at(texts, first - 2) == "in"
+        )
         # Parentheses that only group an operand, as in `(i + 1) == 2`, are
         # part of the enclosing clause.
         if compares or not _grouping_parentheses(texts, first - 1, last + 1):
@@ -1187,13 +1222,15 @@ def _clause_at(source: str, start: int) -> _Clause:
 _SHIFT_AMOUNT_ENDS = _COMPARISON_OPERATORS | {"<<", ">>", "&", "|", "^", "in", "not", "if", "else"}
 # Builtins whose result type is their (last) type argument.
 _TYPED_BY_ARGUMENT = frozenset({"convert", "max_value", "min_value", "empty"})
+# Builtins whose result type is their arguments' type.
+_TYPED_LIKE_ARGUMENTS = frozenset({"min", "max"})
 
 
 def _context_text(tokens: list[tokenize.TokenInfo]) -> str:
     """The text of ``tokens`` without what doesn't type their value: nested
     ternary conditions, shift amounts, call arguments and subscript indexes.
-    A call to a builtin typed by its argument keeps that argument
-    (`convert(_, uint256)`)."""
+    A call to a builtin typed by its arguments keeps them (`max(x, 0)`), and
+    one typed by its type argument keeps that (`convert(0, uint256)`)."""
     texts = [token.string for token in tokens]
     pieces: list[str] = []
     run: list[tokenize.TokenInfo] = []
@@ -1211,7 +1248,9 @@ def _context_text(tokens: list[tokenize.TokenInfo]) -> str:
             kept = ""
             if text == "(" and callee in _TYPED_BY_ARGUMENT:
                 arguments = _top_level_arguments(tokens, position + 1, close)
-                kept = "_, " * (len(arguments) - 1) + arguments[-1] if arguments else ""
+                kept = "0, " * (len(arguments) - 1) + arguments[-1] if arguments else ""
+            elif text == "(" and callee in _TYPED_LIKE_ARGUMENTS:
+                kept = _context_text(tokens[position + 1 : close])
             pieces.append((_statement_text(run) if run else "") + text + kept + texts[close])
             run = []
             position = close + 1
