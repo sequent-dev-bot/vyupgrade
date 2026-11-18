@@ -437,6 +437,61 @@ def f() -> uint256:
         assert _outcome(deployment, "f()") == 12
 
 
+def test_shift_amounts_and_call_arguments_type_no_signed_operand(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@internal
+@pure
+def delta(a: uint256) -> int256:
+    return convert(a, int256)
+
+@external
+@pure
+def f(x: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if (i) << x == 2:
+            count += 1
+        if i << x == 2:
+            count += 1
+        if i + self.delta(x) == 2:
+            count += 1
+    return count
+""")
+    for x in (0, 1):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256)", x) == 3
+
+
+def test_signed_conversion_casts_only_names_whose_clause_is_unsigned(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+LIMIT: immutable(int256)
+
+@external
+def __init__():
+    LIMIT = -1
+
+@external
+@payable
+def f() -> int256:
+    return convert(msg.value if LIMIT + 1 == 2 else 1, int256)
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 1
+
+
+def test_parenthesized_literal_expression_peer_keeps_the_cast(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+C: constant(int8) = 2
+
+@external
+@pure
+def f() -> bool:
+    return C == (2 + 126) + 1
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 0
+
+
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])
 def test_tuple_assignment_preserves_signed_membership(tmp_path, index):
     deployments = _migration_pair(tmp_path, f"""# @version 0.3.10

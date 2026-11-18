@@ -397,6 +397,7 @@ def _mixed_signed_unsigned_arithmetic(
                     _inside_attribute_access(source, start, end)
                     or _inside_nested_convert_call(source, start, match.end() - 1)
                     or _inside_type_subscript(source, start)
+                    or not _has_unsigned_context(_clause_at(source, start).context, vars_for_line)
                 ):
                     continue
                 replacement = f"convert({name}, uint256)"
@@ -1001,10 +1002,10 @@ def _signed_name_has_unsigned_context(
     # A comparison's operands take each other's type, not the type the
     # assignment target or an enclosing array index expects.
     if clause.compares:
-        return _has_unsigned_context(clause.text, vars_for_line)
+        return _has_unsigned_context(clause.context, vars_for_line)
     if _is_unsigned_integer_type(lhs_type) or _inside_array_subscript(line, index, vars_for_line):
         return True
-    return _has_unsigned_context(clause.text, vars_for_line)
+    return _has_unsigned_context(clause.context, vars_for_line)
 
 
 def _has_unsigned_context(line: str, vars_for_line: dict[str, str]) -> bool:
@@ -1222,16 +1223,18 @@ class _Clause:
     """The comparison or arithmetic operand that holds a name: what lies
     between the nearest lower-precedence tokens around it, within its
     enclosing call, subscript, list or struct brackets. Its text leaves out
-    the conditions of ternaries nested in it, which type nothing in it."""
+    the conditions of ternaries nested in it, which type nothing in it, and
+    its context also leaves out shift amounts and call arguments."""
 
     text: str
+    context: str
     compares: bool
 
 
 def _clause_at(source: str, start: int) -> _Clause:
     found = _statement_name_tokens(source).get(start)
     if found is None:
-        return _Clause("", compares=False)
+        return _Clause("", "", compares=False)
     tokens, position = found
     texts = [token.string for token in tokens]
     first = last = position
@@ -1242,9 +1245,101 @@ def _clause_at(source: str, start: int) -> _Clause:
         # Parentheses that only group an operand, as in `(i + 1) == 2`, are
         # part of the enclosing clause.
         if compares or not _grouping_parentheses(texts, first - 1, last + 1):
-            runs = _without_ternary_conditions(tokens[first : last + 1])
-            return _Clause(" ".join(_statement_text(run) for run in runs), compares=compares)
+            clause = tokens[first : last + 1]
+            text = " ".join(_statement_text(run) for run in _without_ternary_conditions(clause))
+            return _Clause(text, _context_text(clause), compares=compares)
         first, last = first - 1, last + 1
+
+
+# Tokens that end a shift amount: operators that bind less tightly than a shift.
+_SHIFT_AMOUNT_ENDS = _COMPARISON_OPERATORS | {"<<", ">>", "&", "|", "^", "in", "not", "if", "else"}
+# Builtins whose result type is their (last) type argument.
+_TYPED_BY_ARGUMENT = frozenset({"convert", "max_value", "min_value", "empty"})
+
+
+def _context_text(tokens: list[tokenize.TokenInfo]) -> str:
+    """The text of ``tokens`` without what doesn't type their value: nested
+    ternary conditions, shift amounts and call arguments. A call to a
+    builtin typed by its argument keeps that argument (`convert(_, uint256)`)."""
+    texts = [token.string for token in tokens]
+    pieces: list[str] = []
+    run: list[tokenize.TokenInfo] = []
+    position = 0
+    while position < len(tokens):
+        text = texts[position]
+        if text in ("<<", ">>", "if"):
+            pieces.append(_statement_text(run) if run else "")
+            run = []
+            position = _skip_operand(texts, position)
+            continue
+        if text == "(" and _call_parenthesis(texts, position):
+            close = _matching_close(texts, position)
+            callee = run.pop().string if run else ""
+            pieces.append(_statement_text(run) if run else "")
+            run = []
+            arguments = _top_level_arguments(tokens, position + 1, close)
+            kept = "_, " * (len(arguments) - 1) + arguments[-1] if arguments else ""
+            pieces.append(f"{callee}({kept if callee in _TYPED_BY_ARGUMENT else ''})")
+            position = close + 1
+            continue
+        run.append(tokens[position])
+        position += 1
+    pieces.append(_statement_text(run) if run else "")
+    return " ".join(piece for piece in pieces if piece)
+
+
+def _skip_operand(texts: list[str], position: int) -> int:
+    """The position after a shift amount, or after a ternary's ``if <condition> else``."""
+    ternary = texts[position] == "if"
+    depth = pending = 0
+    position += 1
+    while position < len(texts):
+        text = texts[position]
+        if text in _OPENERS:
+            depth += 1
+        elif text in _CLOSERS:
+            if depth == 0:
+                return position
+            depth -= 1
+        elif depth == 0 and ternary and text == "if":
+            pending += 1
+        elif depth == 0 and ternary and text == "else":
+            if pending == 0:
+                return position + 1
+            pending -= 1
+        elif depth == 0 and not ternary and text in _SHIFT_AMOUNT_ENDS:
+            return position
+        position += 1
+    return position
+
+
+def _matching_close(texts: list[str], position: int) -> int:
+    depth = 0
+    for index in range(position, len(texts)):
+        if texts[index] in _OPENERS:
+            depth += 1
+        elif texts[index] in _CLOSERS:
+            depth -= 1
+            if depth == 0:
+                return index
+    return len(texts) - 1
+
+
+def _top_level_arguments(tokens: list[tokenize.TokenInfo], first: int, close: int) -> list[str]:
+    arguments: list[str] = []
+    start = first
+    depth = 0
+    for index in range(first, close + 1):
+        text = tokens[index].string
+        if text in _OPENERS:
+            depth += 1
+        elif text in _CLOSERS and depth > 0:
+            depth -= 1
+        elif depth == 0 and (text == "," or index == close):
+            if start < index:
+                arguments.append(_statement_text(tokens[start:index]))
+            start = index + 1
+    return arguments
 
 
 def _without_ternary_conditions(
@@ -1252,25 +1347,16 @@ def _without_ternary_conditions(
 ) -> list[list[tokenize.TokenInfo]]:
     """The runs of ``tokens`` left after cutting each nested ternary's
     ``if <condition> else``."""
+    texts = [token.string for token in tokens]
     runs: list[list[tokenize.TokenInfo]] = [[]]
-    conditions: list[int] = []  # bracket depth of each `if` whose `else` is pending
-    depth = 0
-    for token in tokens:
-        text = token.string
-        if text in _OPENERS:
-            depth += 1
-        elif text in _CLOSERS:
-            depth -= 1
-        elif text == "if":
-            conditions.append(depth)
+    position = 0
+    while position < len(tokens):
+        if texts[position] == "if":
+            position = _skip_operand(texts, position)
+            runs.append([])
             continue
-        elif text == "else" and conditions and conditions[-1] == depth:
-            conditions.pop()
-            if not conditions:
-                runs.append([])
-            continue
-        if not conditions:
-            runs[-1].append(token)
+        runs[-1].append(tokens[position])
+        position += 1
     return [run for run in runs if run]
 
 
@@ -1311,10 +1397,16 @@ def _has_top_level_comparison(texts: list[str]) -> bool:
 
 
 def _grouping_parentheses(texts: list[str], open_position: int, close_position: int) -> bool:
-    if _token_at(texts, open_position) != "(" or _token_at(texts, close_position) != ")":
-        return False
+    return (
+        _token_at(texts, open_position) == "("
+        and _token_at(texts, close_position) == ")"
+        and not _call_parenthesis(texts, open_position)
+    )
+
+
+def _call_parenthesis(texts: list[str], open_position: int) -> bool:
     before = _token_at(texts, open_position - 1)
-    return before is None or not (
+    return before is not None and (
         before in (")", "]") or (before.isidentifier() and not keyword.iskeyword(before))
     )
 
@@ -1443,10 +1535,8 @@ def _comparison_peer(expr: str, name: str) -> str | None:
 
 def _strip_comparison_wrappers(expr: str) -> str:
     expr = expr.strip()
-    while expr.startswith("("):
-        expr = expr[1:].strip()
-    while expr.endswith(")"):
-        expr = expr[:-1].strip()
+    while expr.startswith("(") and find_matching(expr, 0) == len(expr) - 1:
+        expr = expr[1:-1].strip()
     return expr
 
 
