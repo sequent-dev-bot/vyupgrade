@@ -24,9 +24,8 @@ INTERFACE_AST_FORMAT = "interface_ast_v1"
 LOOP_TYPES_FORMAT = "loop_types_v1"
 SOURCE_EVIDENCE_FORMATS = {
     # Before 0.3.2, constants fold to untyped literals ahead of type checking, and an
-    # unannotated loop variable takes the first candidate type its body accepts. Only
-    # 0.2.9 and later record that type on the loop target.
-    **{f"0.2.{patch}": LOOP_TYPES_FORMAT for patch in range(9, 17)},
+    # unannotated loop variable takes the first candidate type its body accepts.
+    **{f"0.2.{patch}": LOOP_TYPES_FORMAT for patch in range(17)},
     "0.3.0": LOOP_TYPES_FORMAT,
     "0.3.1": LOOP_TYPES_FORMAT,
     "0.3.10": "external_calls_v1",
@@ -351,21 +350,53 @@ def _collect_source_evidence(data, evidence_format):
     return None
 
 
+def _codegen_loop_type(node, version, vy_ast):
+    """The type code generation gives a loop variable, as each release decides it.
+
+    ``None`` when the release doesn't record it.
+    """
+    is_range = isinstance(node.iter, vy_ast.Call) and node.iter.get("func.id") == "range"
+    if is_range and version < (0, 2, 9):
+        # Range counters are int128 through 0.2.5; 0.2.6 to 0.2.8 read `_type`, which
+        # the semantic pass sets on the target, and fall back to int128.
+        return getattr(node.target, "_type", None) or "int128"
+    if not is_range and version < (0, 2, 12):
+        return _legacy_list_type(node.iter, vy_ast)
+    return getattr(node.target, "_metadata", {}).get("type")
+
+
+def _legacy_list_type(iterable, vy_ast):
+    # Before 0.2.12 a literal list keeps its own type: folded integer literals are int128
+    # below 2**127 and uint256 above, and the elements must agree.
+    if not isinstance(iterable, vy_ast.List) or not iterable.elements:
+        return None
+    if not all(isinstance(element, vy_ast.Int) for element in iterable.elements):
+        return None
+    types = {"int128" if element.value < 2**127 else "uint256" for element in iterable.elements}
+    return types.pop() if len(types) == 1 else None
+
+
 def _loop_types(compiler_data):
     from vyper import ast as vy_ast
 
+    release = re.match(r"(\d+)\.(\d+)\.(\d+)", importlib.metadata.version("vyper"))
+    if release is None:
+        return None
+    version = tuple(int(part) for part in release.groups())
     loops = []
     for node in compiler_data.vyper_module_folded.get_descendants(vy_ast.For):
-        loop_type = node.target._metadata.get("type")
-        if loop_type is None or not isinstance(node.target, vy_ast.Name):
+        if not isinstance(node.target, vy_ast.Name):
             # Rules pair loops by position, so a partial list would misattribute types.
+            return None
+        loop_type = _codegen_loop_type(node, version, vy_ast)
+        if loop_type is None and version >= (0, 2, 12):
             return None
         loops.append(
             {
                 "line": node.lineno,
                 "column": node.col_offset,
                 "name": node.target.id,
-                "type": str(loop_type),
+                "type": None if loop_type is None else str(loop_type),
             }
         )
     if not loops:

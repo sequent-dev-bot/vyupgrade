@@ -3,18 +3,19 @@
 ## Unreleased
 
 - Annotate loop variables in sources for Vyper before 0.3.2 with the type the
-  source compiler gave them (`VY070`). Those compilers fold constants into
-  untyped literals and type a loop variable by its body, so
-  `for i in range(MAX_COINS)` with an `int128` constant could be `uint256` or
-  `int256`; taking `int128` from the constant made a narrowing
-  `convert(i * 8, int128)` a same-type conversion the target rejected. List
-  constants of another type are converted to the reported type. Without that
-  evidence (Vyper before 0.2.9, which doesn't record the type, an explicit
-  `--source-vyper` executable, a failed source compile),
-  a loop over only literals and constants is left unannotated for the target
-  compiler to reject rather than guessed; the version of the compiler that
-  accepted the file decides, so a file without a pragma counts too. A degraded
-  source compile (no layout before 0.2.16) now keeps its rewrite evidence.
+  source compiler's code generation gave them (`VY070`). Those compilers fold
+  constants into untyped literals, and from 0.2.6 type a range counter by the
+  loop body (before that it is always `int128`), so `for i in range(MAX_COINS)`
+  with an `int128` constant could be `uint256` or `int256`; taking `int128`
+  from the constant made a narrowing `convert(i * 8, int128)` a same-type
+  conversion the target rejected. Until 0.2.12 a literal list keeps its own
+  element type, and list constants of another type are converted to the
+  reported type. Without that evidence (an explicit `--source-vyper`
+  executable, a failed source compile), a loop over only literals and
+  constants is left unannotated for the target compiler to reject rather than
+  guessed; the version of the compiler that accepted the file decides, so a
+  file without a pragma counts too. A degraded source compile (no layout
+  before 0.2.16) now keeps its rewrite evidence.
 - Convert a constant range bound to a signed loop variable's type too
   (`VY056`), including a `uint256` constant whose value fits. Constant
   arithmetic that would overflow in the loop type becomes its folded value,

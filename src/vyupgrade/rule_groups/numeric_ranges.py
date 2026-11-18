@@ -206,10 +206,11 @@ def _literal_list_as(
     return f"[{', '.join(converted)}]"
 
 
-def _source_loop_types(rule_context: RuleContext, names: list[str]) -> list[str] | None:
+def _source_loop_types(rule_context: RuleContext, names: list[str]) -> list[str | None] | None:
     """The source compiler's loop variable types, one per loop in ``names`` order, if known.
 
-    VY070 uses only the integer ones: those are what the compiler infers from the loop body.
+    Each is the type the compiler's code generation gave the variable, or ``None`` where
+    that release doesn't record it. VY070 uses only the integer ones.
 
     Before 0.3.2 the compiler folds constants into untyped literals and gives an unannotated
     loop variable the first candidate type its body accepts, which source text cannot predict.
@@ -227,7 +228,7 @@ def _source_loop_types(rule_context: RuleContext, names: list[str]) -> list[str]
         return None
     types = [loop.get("type") for loop in loops]
     if [loop.get("name") for loop in loops] != names or not all(
-        isinstance(type_name, str) and type_name for type_name in types
+        type_name is None or (isinstance(type_name, str) and type_name) for type_name in types
     ):
         return None
     return types

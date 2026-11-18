@@ -487,24 +487,52 @@ def offset(start: uint256) -> uint256:
     assert "    for i: uint256 in range(start, start + 2, bound=2):" in rewrite.source
 
 
-def test_loops_of_compilers_without_loop_types_stay_untyped(tmp_path):
-    # Vyper before 0.2.9 does not record the type it chose for a loop variable.
-    source = """# @version 0.2.4
+@pytest.mark.parametrize(
+    ("version", "body", "annotations"),
+    [
+        # Through 0.2.5 code generation types every range counter int128.
+        (
+            "0.2.4",
+            """    for i in range(2):
+        total += shift(x, i)
+""",
+            ["for i: int128 in range(2):"],
+        ),
+        # 0.2.6 to 0.2.8 use the semantic pass's choice for ranges, but type a literal
+        # list by its own elements until 0.2.12.
+        (
+            "0.2.8",
+            """    for i in range(4):
+        if i == n:
+            break
+        total += x
+    for j in [1, 2]:
+        total += shift(x, j)
+""",
+            ["for i: uint256 in range(4):", "for j: int128 in [1, 2]:"],
+        ),
+    ],
+)
+def test_early_legacy_loops_take_their_code_generation_type(tmp_path, version, body, annotations):
+    source = f"""# @version {version}
 @external
 @pure
-def f(x: uint256) -> uint256:
+def f(x: uint256, n: uint256) -> uint256:
     total: uint256 = 0
-    for i in range(2):
-        total += shift(x, i)
-    return total
+{body}    return total
 """
     path = tmp_path / "entry.vy"
     path.write_text(source, encoding="utf-8")
     config = Config(paths=(path,), target_version="0.4.3")
     batch = engine.prepare_migrations([engine.bounded_migration_request(path, source, config)], config)
-
-    assert "    for i in range(2):" in batch.files[0].rewrite.source
-
+    migrated_source = batch.files[0].rewrite.source
+    for annotation in annotations:
+        assert annotation in migrated_source
+    original = _deploy(path, source, version)
+    migrated = _deploy(path, migrated_source, "0.4.3")
+    for n in (0, 1, 5):
+        outcomes = [_outcome(deployment, "f(uint256,uint256)", 0xABC, n) for deployment in (original, migrated)]
+        assert outcomes[0] == outcomes[1], (n, outcomes)
 
 def test_internal_guard_rejects_reentrant_callback(tmp_path):
     deployments = _migration_pair(tmp_path, """# @version 0.3.10

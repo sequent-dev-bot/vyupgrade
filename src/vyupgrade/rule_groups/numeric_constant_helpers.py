@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-import re
 from collections.abc import Callable
 
 from ..analysis import is_integer_type, normalize_type
@@ -10,7 +9,7 @@ from ..constant_evaluation import (
     eval_integer_constant_expr,
     integer_constant_values as integer_constant_values,
 )
-from ..source import split_top_level_args
+from ..source import line_offsets, split_top_level_args
 from .numeric_types import integer_value_fits_type
 
 
@@ -53,7 +52,8 @@ def retype_integer_operands(
         tree = ast.parse(text, mode="eval")
     except (SyntaxError, ValueError, RecursionError):
         return None
-    rows = [0, *(match.end() for match in re.finditer("\n", text))]
+    # Python's parser ends lines at CR, LF and CRLF alike.
+    rows = line_offsets(text)
     edits: list[tuple[int, int, str]] = []
 
     def offset(row: int, column: int) -> int:
@@ -81,7 +81,7 @@ def retype_integer_operands(
 
     def fits(node: ast.expr) -> bool:
         start, end = span(node)
-        value = eval_integer_constant_expr(text[start:end], values)
+        value = eval_integer_constant_expr(f"({text[start:end]})", values)
         return value is not None and integer_value_fits_type(value, target)
 
     def visit(node: ast.expr) -> bool:
@@ -93,7 +93,7 @@ def retype_integer_operands(
         ):
             # Computing it in the target type would overflow where folding did not.
             start, end = span(node)
-            value = eval_integer_constant_expr(text[start:end], values)
+            value = eval_integer_constant_expr(f"({text[start:end]})", values)
             if value is None or not integer_value_fits_type(value, target):
                 return False
             edits.append((start, end, f"({value})" if value < 0 else str(value)))

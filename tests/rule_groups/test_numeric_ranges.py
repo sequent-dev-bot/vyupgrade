@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vyupgrade.ast_facts import compiler_source_sha256
 from vyupgrade.models import CompilerFacts
+from vyupgrade.rule_groups.numeric_constant_helpers import retype_integer_operands
 from vyupgrade.rules import apply_rules
 
 
@@ -855,3 +856,14 @@ def test_legacy_loop_type_comes_from_the_resolved_source_compiler(config) -> Non
 
     assert "for i: int128 in range(MAX_COINS):" in unknown.source
     assert "    for i in range(MAX_COINS):" in legacy.source
+
+
+def test_retyped_range_operands_map_lone_cr_line_breaks() -> None:
+    def keep(_declared: str) -> bool:
+        return False
+
+    assert (
+        retype_integer_operands("N +\r 1", "uint256", {"N": "int128"}, {"N": 3}, keep)
+        == "convert(N, uint256) +\r 1"
+    )
+    assert retype_integer_operands("(A +\r B) - A", "int128", {"A": "uint256", "B": "uint256"}, {"A": 2**127 - 1, "B": 1}, keep) == "1"
