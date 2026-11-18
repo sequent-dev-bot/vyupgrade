@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import keyword
 import re
 import tokenize
+from dataclasses import dataclass
 from functools import lru_cache
 
 from ..analysis import (
     SourceFacts,
+    _statement_text,
     infer_expr_type,
     indexed_key_type,
     indexed_value_type,
     normalize_type,
     parse_source_facts,
 )
-from ..constant_evaluation import integer_constant_values
+from ..constant_evaluation import eval_integer_constant_expr, integer_constant_values
 from ..models import Diagnostic, Fix
 from ..rule_helpers import (
     innermost_non_overlapping as _innermost_non_overlapping,
@@ -169,7 +172,13 @@ def _mixed_signed_unsigned_arithmetic(
                     or (
                         comparison_target is None
                         and not _signed_name_has_unsigned_context(
-                            rhs, match.start(), name, lhs_type, vars_for_line, facts
+                            rhs,
+                            match.start(),
+                            _clause_at(source, start),
+                            name,
+                            lhs_type,
+                            vars_for_line,
+                            facts,
                         )
                     )
                 ):
@@ -212,9 +221,8 @@ def _mixed_signed_unsigned_arithmetic(
                 ):
                     continue
                 loop_type = normalize_type(vars_for_line.get(name) or "")
-                local_expr = _local_expression(source, start)
-                comparison_expr = _comparison_expression_at(source, start)
-                comparison_peer = _comparison_peer(comparison_expr, name)
+                clause = _clause_at(source, start).text
+                comparison_peer = _comparison_peer(clause, name)
                 if (
                     comparison_peer in constant_values
                     and comparison_peer in facts.global_vars
@@ -236,13 +244,11 @@ def _mixed_signed_unsigned_arithmetic(
                     None
                     if comparison_peer is not None
                     else _unsigned_name_signed_arithmetic_target_type(
-                        local_expr, name, lhs_type, vars_for_line, facts
+                        clause, name, lhs_type, vars_for_line, facts
                     )
                 )
                 target_type = (
-                    _signed_comparison_target_type(
-                        comparison_expr, name, vars_for_line
-                    )
+                    _signed_comparison_target_type(clause, name, vars_for_line)
                     or _signed_comparison_target_type_at(
                         source, start, name, vars_for_line
                     )
@@ -303,15 +309,15 @@ def _mixed_signed_unsigned_arithmetic(
                 ):
                     continue
                 local_expr = _local_expression(source, start)
-                comparison_expr = _comparison_expression_at(source, start)
+                clause = _clause_at(source, start).text
                 comparison_target = _signed_comparison_target_type_at(
                     source, start, name, vars_for_line
                 )
                 arithmetic_target = (
                     None
-                    if _comparison_peer(comparison_expr, name) is not None
+                    if _comparison_peer(clause, name) is not None
                     else _unsigned_name_signed_arithmetic_target_type(
-                        local_expr, name, lhs_type, vars_for_line, facts
+                        clause, name, lhs_type, vars_for_line, facts
                     )
                 )
                 division_target = _unsigned_name_signed_division_target_type(
@@ -593,7 +599,7 @@ def _signed_loop_comparison_convert_cleanup(
         if not _is_signed_integer_type(loop_type):
             continue
         converted = source[match.start() : close + 1]
-        peer = _comparison_peer_for_expression(_comparison_expression_at(source, match.start()), converted)
+        peer = _comparison_peer_for_expression(_clause_at(source, match.start()).text, converted)
         if peer is None or not _expression_is_signed_integer(peer, vars_for_line, facts):
             continue
         edits.append(TextEdit(match.start(), close + 1, name))
@@ -610,15 +616,6 @@ def _signed_loop_comparison_convert_cleanup(
 
 
 def _comparison_peer_for_expression(expr: str, target: str) -> str | None:
-    expr = expr.strip().removesuffix(":").strip()
-    expr = re.sub(r"^(?:if|elif|assert|return)\s+", "", expr)
-    for separator in (" and ", " or "):
-        if separator in expr:
-            for part in expr.split(separator):
-                if target in part:
-                    peer = _comparison_peer_for_expression(part, target)
-                    if peer is not None:
-                        return peer
     match = re.match(r"(.+?)\s*(==|!=|<=|>=|<|>)\s*(.+)\Z", expr)
     if match is None:
         return None
@@ -982,8 +979,9 @@ def _expression_has_signed_integer(
 
 
 def _signed_name_has_unsigned_context(
-    source: str,
+    line: str,
     index: int,
+    clause: _Clause,
     name: str,
     lhs_type: str | None,
     vars_for_line: dict[str, str],
@@ -991,7 +989,7 @@ def _signed_name_has_unsigned_context(
 ) -> bool:
     if _is_signed_integer_type(lhs_type):
         return False
-    peer = _comparison_peer(_local_expression(source, index), name)
+    peer = _comparison_peer(clause.text, name)
     if (
         peer is not None
         and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", peer)
@@ -999,13 +997,12 @@ def _signed_name_has_unsigned_context(
         and _is_unsigned_integer_type(vars_for_line.get(peer))
     ):
         return False
-    if _is_unsigned_integer_type(lhs_type):
+    # A comparison's operands take each other's type, not the assignment target's.
+    if _is_unsigned_integer_type(lhs_type) and not clause.compares:
         return True
-    if _inside_array_subscript(source, index, vars_for_line):
+    if _inside_array_subscript(line, index, vars_for_line):
         return True
-    return _has_unsigned_context(
-        _local_expression(source, index), vars_for_line
-    ) or _enclosing_argument_has_unsigned_context(source, index, vars_for_line)
+    return _has_unsigned_context(clause.text, vars_for_line)
 
 
 def _has_unsigned_context(line: str, vars_for_line: dict[str, str]) -> bool:
@@ -1024,35 +1021,9 @@ def _has_unsigned_context(line: str, vars_for_line: dict[str, str]) -> bool:
     return False
 
 
-def _enclosing_argument_has_unsigned_context(
-    source: str, index: int, vars_for_line: dict[str, str]
-) -> bool:
-    line_start = source.rfind("\n", 0, index) + 1
-    line_end = source.find("\n", index)
-    if line_end == -1:
-        line_end = len(source)
-    opens = [match.start() for match in re.finditer(r"\(", source[line_start:index])]
-    for relative_open in reversed(opens):
-        open_index = line_start + relative_open
-        close = find_matching(source, open_index)
-        if close is None or close < index or close > line_end:
-            continue
-        raw_args = source[open_index + 1 : close]
-        offset = index - open_index - 1
-        spans = split_top_level_arg_spans(raw_args)
-        if spans is None:
-            continue
-        for start, end, arg in spans:
-            if start <= offset <= end and _has_unsigned_context(arg, vars_for_line):
-                return True
-    return False
-
-
 def _signed_comparison_target_type(
     expr: str, name: str, vars_for_line: dict[str, str]
 ) -> str | None:
-    expr = expr.strip().removesuffix(":").strip()
-    expr = re.sub(r"^(?:if|elif|assert|return)\s+", "", expr)
     match = re.match(r"(.+?)\s*(==|!=|<=|>=|<|>)\s*(.+)\Z", expr)
     if match is None:
         return None
@@ -1143,17 +1114,6 @@ def _unsigned_name_signed_arithmetic_target_type(
 def _unsigned_name_signed_comparison_expression_type(
     expr: str, name: str, vars_for_line: dict[str, str], facts: SourceFacts
 ) -> str | None:
-    expr = expr.strip().removesuffix(":").strip()
-    expr = re.sub(r"^(?:if|elif|assert|return)\s+", "", expr)
-    for separator in (" and ", " or "):
-        if separator in expr:
-            for part in expr.split(separator):
-                if re.search(rf"\b{re.escape(name)}\b", part):
-                    target_type = _unsigned_name_signed_comparison_expression_type(
-                        part, name, vars_for_line, facts
-                    )
-                    if target_type is not None:
-                        return target_type
     match = re.match(r"(.+?)\s*(==|!=|<=|>=|<|>)\s*(.+)\Z", expr)
     if match is None:
         return None
@@ -1171,7 +1131,7 @@ def _unsigned_name_signed_comparison_expression_type(
 def _signed_comparison_target_type_at(
     source: str, index: int, name: str, vars_for_line: dict[str, str]
 ) -> str | None:
-    other = _comparison_peer(_comparison_expression_at(source, index), name)
+    other = _comparison_peer(_clause_at(source, index).text, name)
     if other is None:
         return None
     other_type = infer_expr_type(other, vars_for_line)
@@ -1181,9 +1141,15 @@ def _signed_comparison_target_type_at(
 def _unsigned_comparison_target_type_at(
     source: str, index: int, name: str, vars_for_line: dict[str, str], facts: SourceFacts
 ) -> str | None:
-    other = _comparison_peer(_comparison_expression_at(source, index), name)
+    other = _comparison_peer(_clause_at(source, index).text, name)
     if other is None:
         return None
+    value = eval_integer_constant_expr(other, {}) if _LITERAL_EXPRESSION.fullmatch(other) else None
+    if value is not None:
+        # A literal takes the other operand's type when its value fits it.
+        if _integer_value_fits_type(value, vars_for_line.get(name) or ""):
+            return None
+        return "uint256" if _integer_value_fits_type(value, "uint256") else None
     if (
         other in facts.global_vars
         and other not in facts.loop_vars_at_line(line_number(source, index))
@@ -1195,6 +1161,8 @@ def _unsigned_comparison_target_type_at(
 
 
 _COMPARISON_OPERATORS = frozenset({"==", "!=", "<=", ">=", "<", ">"})
+# Integer arithmetic on decimal and octal literals only.
+_LITERAL_EXPRESSION = re.compile(r"(?:\s|[-+*/%()]|\d(?:_?\d)*|0[oO](?:_?[0-7])+)+")
 # Tokens that bind less tightly than a comparison, so a comparison operand
 # starts right after one or ends right before one.
 _OPERAND_OPENERS = frozenset(
@@ -1234,6 +1202,84 @@ def _literal_comparison_operand(
     else:
         return False
     return literal is not None and _integer_value_fits_type(literal, vars_for_line.get(name) or "")
+
+
+# Tokens that bind less tightly than any arithmetic or comparison, so they
+# bound the clause a name's signedness context comes from.
+_CLAUSE_BOUNDARIES = frozenset(
+    {"and", "or", "not", "if", "elif", "else", "assert", "return", ",", ":", "="}
+    | {f"{op}=" for op in ("+", "-", "*", "/", "//", "%", "**", "<<", ">>", "&", "|", "^")}
+)
+_OPENERS = frozenset({"(", "[", "{"})
+_CLOSERS = frozenset({")", "]", "}"})
+
+
+@dataclass(frozen=True)
+class _Clause:
+    """The comparison or arithmetic operand that holds a name: what lies
+    between the nearest lower-precedence tokens around it, within its
+    enclosing call, subscript, list or struct brackets."""
+
+    text: str
+    compares: bool
+
+
+def _clause_at(source: str, start: int) -> _Clause:
+    found = _statement_name_tokens(source).get(start)
+    if found is None:
+        return _Clause("", compares=False)
+    tokens, position = found
+    texts = [token.string for token in tokens]
+    first = last = position
+    while True:
+        first = _clause_edge(texts, first, -1)
+        last = _clause_edge(texts, last, 1)
+        compares = _has_top_level_comparison(texts[first : last + 1])
+        # Parentheses that only group an operand, as in `(i + 1) == 2`, are
+        # part of the enclosing clause.
+        if compares or not _grouping_parentheses(texts, first - 1, last + 1):
+            return _Clause(_statement_text(tokens[first : last + 1]), compares=compares)
+        first, last = first - 1, last + 1
+
+
+def _clause_edge(texts: list[str], position: int, step: int) -> int:
+    """The last token from ``position`` in direction ``step`` before a clause
+    boundary or the enclosing bracket."""
+    inward, outward = (_OPENERS, _CLOSERS) if step > 0 else (_CLOSERS, _OPENERS)
+    depth = 0
+    while 0 <= position + step < len(texts):
+        text = texts[position + step]
+        if text in inward:
+            depth += 1
+        elif text in outward:
+            if depth == 0:
+                return position
+            depth -= 1
+        elif depth == 0 and text in _CLAUSE_BOUNDARIES:
+            return position
+        position += step
+    return position
+
+
+def _has_top_level_comparison(texts: list[str]) -> bool:
+    depth = 0
+    for text in texts:
+        if text in _OPENERS:
+            depth += 1
+        elif text in _CLOSERS:
+            depth -= 1
+        elif depth == 0 and text in _COMPARISON_OPERATORS:
+            return True
+    return False
+
+
+def _grouping_parentheses(texts: list[str], open_position: int, close_position: int) -> bool:
+    if _token_at(texts, open_position) != "(" or _token_at(texts, close_position) != ")":
+        return False
+    before = _token_at(texts, open_position - 1)
+    return before is None or not (
+        before in (")", "]") or (before.isidentifier() and not keyword.iskeyword(before))
+    )
 
 
 def _token_at(texts: list[str], position: int) -> str | None:
@@ -1347,16 +1393,6 @@ def _is_literal_comparison_cast(source: str, facts: SourceFacts, edit: TextEdit)
 
 
 def _comparison_peer(expr: str, name: str) -> str | None:
-    expr = expr.strip().removesuffix(":").strip()
-    expr = re.sub(r"^(?:if|elif|assert|return)\s+", "", expr)
-    expr = _strip_comparison_wrappers(expr)
-    for separator in (" and ", " or "):
-        if separator in expr:
-            for part in expr.split(separator):
-                if re.search(rf"\b{re.escape(name)}\b", part):
-                    peer = _comparison_peer(part, name)
-                    if peer is not None:
-                        return peer
     match = re.match(r"(.+?)\s*(==|!=|<=|>=|<|>)\s*(.+)\Z", expr)
     if match is None:
         return None
@@ -1375,20 +1411,6 @@ def _strip_comparison_wrappers(expr: str) -> str:
     while expr.endswith(")"):
         expr = expr[:-1].strip()
     return expr
-
-
-def _comparison_expression_at(source: str, index: int) -> str:
-    line_start = source.rfind("\n", 0, index) + 1
-    line_end = source.find("\n", index)
-    if line_end == -1:
-        line_end = len(source)
-    expr = source[line_start:line_end]
-    mask = code_mask(expr)
-    comment_start = next(
-        (pos for pos, char in enumerate(expr) if char == "#" and (pos == 0 or mask[pos - 1])),
-        None,
-    )
-    return expr[:comment_start] if comment_start is not None else expr
 
 
 def _signed_internal_call_arg_target_type(

@@ -265,6 +265,86 @@ def f(x: uint256) -> uint256:
         assert _outcome(deployment, "f(uint256)", 3) == 38
 
 
+def test_signed_comparison_with_literal_expression_in_later_clause_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f() -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i == 2 or i < 2 + 1:
+            count += 1
+    return count
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 4
+
+
+def test_signed_arithmetic_beside_unsigned_clause_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(x: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i + 1 == 2 and x > 0:
+            count += 1
+    return count
+""")
+    for x, expected in ((0, 0), (5, 1)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256)", x) == expected
+
+
+def test_signed_ternary_condition_with_unsigned_target_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(x: uint256) -> uint256:
+    total: uint256 = 0
+    for i in range(-1, 3):
+        total += x if i < 2 + 1 else 0
+        for j in range(-1, 3):
+            y: uint256 = x if i > j else 1
+            total += y
+    return total
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f(uint256)", 5) == 4 * 5 + 6 * 5 + 10
+
+
+def test_unsigned_loop_index_takes_the_signed_peer_of_its_own_clause(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(y: int128) -> uint256:
+    count: uint256 = 0
+    for k in range(3):
+        if k == 1 or k < y:
+            count += 1
+    return count
+""")
+    for y, expected in ((-1, 1), (0, 1), (2, 2)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(int128)", y) == expected
+
+
+def test_signed_loop_comparison_in_later_clause_drops_the_unsigned_cast(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(n: uint256, x: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if x > 0 and i == convert(n, int256) - 1:
+            count += 1
+    return count
+""")
+    for args, expected in (((0, 1), 1), ((0, 0), 0), ((3, 1), 1)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256,uint256)", *args) == expected
+
+
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])
 def test_tuple_assignment_preserves_signed_membership(tmp_path, index):
     deployments = _migration_pair(tmp_path, f"""# @version 0.3.10
