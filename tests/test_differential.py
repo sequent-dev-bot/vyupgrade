@@ -743,6 +743,34 @@ def f(y: int128, b: bool) -> uint256:
             assert _outcome(deployment, "f(int128,bool)", *args) == expected
 
 
+def test_unsigned_constant_in_folded_arithmetic_is_not_narrowed_to_a_signed_peer(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+C: constant(int8) = 2
+U: constant(uint256) = 127
+
+@external
+@pure
+def f() -> bool:
+    return C == max(U, 0) + 1
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 0
+
+
+def test_signed_constant_beside_an_unsigned_constant_keeps_its_cast(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+K: constant(int8) = 2
+C: constant(uint256) = 130
+
+@external
+@pure
+def f() -> bool:
+    return K + C == 3
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 0
+
+
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])
 def test_tuple_assignment_preserves_signed_membership(tmp_path, index):
     deployments = _migration_pair(tmp_path, f"""# @version 0.3.10

@@ -402,7 +402,8 @@ def _mixed_signed_unsigned_arithmetic(
                     or _inside_nested_convert_call(source, start, match.end() - 1)
                     or _inside_type_subscript(source, start)
                     or not _has_unsigned_context(
-                        _clause_at(source, start).context, _without_constants(vars_for_line, facts)
+                        _clause_at(source, start).context,
+                        _without_constants(vars_for_line, name, facts),
                     )
                 ):
                     continue
@@ -942,19 +943,24 @@ def _signed_name_has_unsigned_context(
         return True
     if clause.typed_by is None and _is_unsigned_integer_type(lhs_type):
         return True
-    return _has_unsigned_context(clause.context, _without_constants(vars_for_line, facts))
+    return _has_unsigned_context(clause.context, _without_constants(vars_for_line, name, facts))
 
 
 def _module_constants(facts: SourceFacts) -> set[str]:
     return {name for name, type_name in facts.global_vars.items() if type_name.startswith("constant(")}
 
 
-def _without_constants(vars_for_line: dict[str, str], facts: SourceFacts) -> dict[str, str]:
-    """The variables without module constants. In source that compiles, a
-    constant in the same operand or comparison as a signed name has been
-    folded into a literal of the name's type, so it gives no unsigned
-    context."""
+def _without_constants(
+    vars_for_line: dict[str, str], name: str, facts: SourceFacts
+) -> dict[str, str]:
+    """The variables without module constants, unless ``name`` is one. In
+    source that compiles, a constant in the same operand or comparison as a
+    signed runtime name has been folded into a literal of the name's type,
+    so it gives no unsigned context; constants alone fold together into an
+    untyped literal."""
     constants = _module_constants(facts)
+    if name in constants:
+        return vars_for_line
     return {name: type_name for name, type_name in vars_for_line.items() if name not in constants}
 
 
@@ -1059,7 +1065,12 @@ def _unsigned_name_signed_arithmetic_target_type(
     if _is_signed_integer_type(lhs_type) and clause.typed_by is None:
         return normalize_type(lhs_type)
     comparison_type = _unsigned_name_signed_comparison_expression_type(
-        clause.typing_text, name, vars_for_line, facts
+        # A constant folds with what it is in; only a runtime name takes the
+        # type of a comparison enclosing its clause.
+        clause.text if name in _module_constants(facts) else clause.typing_text,
+        name,
+        vars_for_line,
+        facts,
     )
     if comparison_type is not None:
         return comparison_type
