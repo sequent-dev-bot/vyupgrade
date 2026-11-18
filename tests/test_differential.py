@@ -696,6 +696,53 @@ def f() -> uint256:
         assert _outcome(deployment, "f()") == 5
 
 
+def test_signed_name_inside_a_string_in_an_index_is_left_alone(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+a: uint256[2]
+
+@external
+def f(i: int128) -> uint256:
+    self.a = [10, 20]
+    return self.a[0 if len("i") == 1 else 1] + convert(i, uint256)
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f(int128)", 0) == 10
+
+
+def test_shift_amount_ends_at_a_boolean_operator(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(s: uint256, x: uint256, y: int128) -> uint256:
+    count: uint256 = 0
+    for k in range(3):
+        if s == 1 << x and k == y:
+            count += 1
+    return count
+""")
+    for args, expected in (((2, 1, 1), 1), ((2, 1, 5), 0), ((4, 1, 1), 0)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256,uint256,int128)", *args) == expected
+
+
+def test_unsigned_loop_index_nested_in_a_signed_comparison_takes_its_type(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(y: int128, b: bool) -> uint256:
+    count: uint256 = 0
+    for k in range(3):
+        if max(k, 0) == y:
+            count += 1
+        if (k if b else 0) == y:
+            count += 10
+    return count
+""")
+    for args, expected in (((1, True), 11), ((0, False), 31), ((-1, True), 0)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(int128,bool)", *args) == expected
+
+
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])
 def test_tuple_assignment_preserves_signed_membership(tmp_path, index):
     deployments = _migration_pair(tmp_path, f"""# @version 0.3.10

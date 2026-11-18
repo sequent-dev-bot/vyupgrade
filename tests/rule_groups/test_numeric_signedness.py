@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from vyupgrade.rules import apply_rules
 
 
@@ -1406,8 +1408,9 @@ def f(x: int256) -> int256:
     assert "term //= (convert(i, int256) + 1)" in result.source
 
 
-def test_long_literal_peer_does_not_abort_the_rewrite(config) -> None:
-    peer = " + ".join(["1"] * 400)
+@pytest.mark.parametrize("terms", [400, 60_000])
+def test_long_literal_peer_does_not_abort_the_rewrite(config, terms) -> None:
+    peer = " + ".join(["1"] * terms)
     source = f"""# @version 0.3.10
 C: constant(int8) = 2
 

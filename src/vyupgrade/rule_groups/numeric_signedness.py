@@ -461,7 +461,8 @@ def _mixed_signed_unsigned_arithmetic(
                     or inside_convert_call(source, start)
                     or _inside_type_subscript(source, start)
                     or not _inside_array_subscript(source, start, vars_for_line)
-                    or _clause_at(source, start).typed_by in ("comparison", "argument")
+                    # A match in a string has no token, so nothing types it.
+                    or _clause_at(source, start).typed_by != "index"
                 ):
                     continue
                 replacement = f"convert({name}, uint256)"
@@ -1043,7 +1044,7 @@ def _unsigned_name_signed_arithmetic_target_type(
     if _is_signed_integer_type(lhs_type) and clause.typed_by is None:
         return normalize_type(lhs_type)
     comparison_type = _unsigned_name_signed_comparison_expression_type(
-        expr, name, vars_for_line, facts
+        clause.typing_text, name, vars_for_line, facts
     )
     if comparison_type is not None:
         return comparison_type
@@ -1104,7 +1105,7 @@ def _literal_value(expr: str) -> int | None:
     and `min`/`max` over them, which compile to a literal."""
     try:
         tree = ast.parse(expr.strip(), mode="eval")
-    except SyntaxError:
+    except (SyntaxError, RecursionError):
         return None
     # The evaluator rejects anything larger, and folding it could exhaust
     # the recursion limit.
@@ -1194,17 +1195,20 @@ class _Clause:
     its context also leaves out shift amounts, call arguments and subscript
     indexes. ``typed_by`` says what gives the name its type: the innermost
     enclosing ``"comparison"``, ``"index"`` or call ``"argument"``, or None
-    when only the statement (an assignment target, say) can."""
+    when only the statement (an assignment target, say) can.
+    ``typing_text`` is the text of the comparison that types it, which may
+    enclose the clause (`max(k, 0) == y`), or else the clause's text."""
 
     text: str
     context: str
     typed_by: str | None
+    typing_text: str
 
 
 def _clause_at(source: str, start: int) -> _Clause:
     found = _statement_name_tokens(source).get(start)
     if found is None:
-        return _Clause("", "", typed_by=None)
+        return _Clause("", "", typed_by=None, typing_text="")
     tokens, position = found
     texts = [token.string for token in tokens]
     first = last = position
@@ -1216,29 +1220,40 @@ def _clause_at(source: str, start: int) -> _Clause:
         # part of the enclosing clause.
         if compares or not _grouping_parentheses(texts, first - 1, last + 1):
             clause = tokens[first : last + 1]
-            text = " ".join(_statement_text(run) for run in _without_ternary_conditions(clause))
-            return _Clause(text, _context_text(clause), typed_by=_typed_by(texts, first, last))
+            typed_by, typing_first, typing_last = _typed_by(texts, first, last)
+            return _Clause(
+                _clause_text(clause),
+                _context_text(clause),
+                typed_by=typed_by,
+                typing_text=_clause_text(tokens[typing_first : typing_last + 1]),
+            )
         first, last = first - 1, last + 1
 
 
-def _typed_by(texts: list[str], first: int, last: int) -> str | None:
+def _clause_text(tokens: list[tokenize.TokenInfo]) -> str:
+    return " ".join(_statement_text(run) for run in _without_ternary_conditions(tokens))
+
+
+def _typed_by(texts: list[str], first: int, last: int) -> tuple[str | None, int, int]:
     """What types the clause ``texts[first:last + 1]``, walking out through
-    the brackets around it. List and tuple elements, `min`/`max` arguments,
-    ternary branches and grouping parentheses take the type of what holds
-    them, so the walk goes on past them."""
+    the brackets around it, and the bounds of the comparison that does. List
+    and tuple elements, `min`/`max` arguments, ternary branches and grouping
+    parentheses take the type of what holds them, so the walk goes on past
+    them."""
+    start = (first, last)
     while not _has_top_level_comparison(texts[first : last + 1]):
         opener = _enclosing_opener(texts, first)
         if opener is None:
-            return None
+            return None, *start
         if _after_operand(texts, opener) and texts[opener] == "[":
-            return "index"
+            return "index", *start
         if texts[opener] == "{" or (
             _after_operand(texts, opener) and texts[opener - 1] not in _TYPED_LIKE_ARGUMENTS
         ):
-            return "argument"
+            return "argument", *start
         first = _clause_edge(texts, opener, -1)
         last = _clause_edge(texts, _matching_close(texts, opener), 1)
-    return "comparison"
+    return "comparison", first, last
 
 
 def _enclosing_opener(texts: list[str], first: int) -> int | None:
@@ -1254,7 +1269,7 @@ def _enclosing_opener(texts: list[str], first: int) -> int | None:
 
 
 # Tokens that end a shift amount: operators that bind less tightly than a shift.
-_SHIFT_AMOUNT_ENDS = _COMPARISON_OPERATORS | {"<<", ">>", "&", "|", "^", "in", "not", "if", "else"}
+_SHIFT_AMOUNT_ENDS = _COMPARISON_OPERATORS | _CLAUSE_BOUNDARIES | {"<<", ">>", "&", "|", "^", "in"}
 # Builtins whose result type is their (last) type argument.
 _TYPED_BY_ARGUMENT = frozenset({"convert", "max_value", "min_value", "empty"})
 # Builtins whose result type is their arguments' type.
