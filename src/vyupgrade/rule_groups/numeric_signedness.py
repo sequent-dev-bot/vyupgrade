@@ -1090,6 +1090,10 @@ def _unsigned_comparison_target_type_at(
         if _integer_value_fits_type(value, vars_for_line.get(name) or ""):
             return None
         return "uint256" if _integer_value_fits_type(value, "uint256") else None
+    if _folds_to_literal(other):
+        # The source compiler folds it to a literal, which takes the name's
+        # type; without its value, cast nothing.
+        return None
     if (
         other in facts.global_vars
         and other not in facts.loop_vars_at_line(line_number(source, index))
@@ -1113,6 +1117,20 @@ def _literal_value(expr: str) -> int | None:
         return None
     text = ast.unparse(_LiteralMinMaxFolder().visit(tree))
     return eval_integer_constant_expr(text, {}) if _LITERAL_EXPRESSION.fullmatch(text) else None
+
+
+def _folds_to_literal(expr: str) -> bool:
+    """Whether ``expr`` calls builtins on literals only (`len(b"ab")`), which
+    the source compiler folds to a literal."""
+    try:
+        tree = ast.parse(expr.strip(), mode="eval")
+    except (SyntaxError, RecursionError):
+        return False
+    nodes = list(ast.walk(tree))
+    callees = {id(node.func) for node in nodes if isinstance(node, ast.Call)}
+    return bool(callees) and not any(
+        isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in callees for node in nodes
+    )
 
 
 class _LiteralMinMaxFolder(ast.NodeTransformer):

@@ -1423,3 +1423,22 @@ def f() -> bool:
     result = apply_rules(source, config(source_version="0.3.10", target_version="0.4.3"))
 
     assert result.source.startswith("#pragma version 0.4.3\n")
+
+
+def test_signed_name_compared_with_a_folded_builtin_call_is_not_cast(config) -> None:
+    source = """# @version 0.3.10
+@external
+@pure
+def f() -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i < len(b"ab"):
+            count += 1
+        if i == -2 or i < len(b"ab"):
+            count += 1
+    return count
+"""
+
+    result = apply_rules(source, config(source_version="0.3.10", target_version="0.4.3"))
+
+    assert "convert(i, uint256)" not in result.source
