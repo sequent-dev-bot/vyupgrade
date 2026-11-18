@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Remove a `convert(...)` around `+ - * / %` integer arithmetic that already has
+  the target type (`VY051`), such as `convert(i*8, int128)` once a legacy
+  `range` loop variable is typed `int128`; the target compiler rejected it as a
+  same-type conversion.
+
 ## 0.11.0 - 2026-11-18
 
 - JSON report schema `7` moves declared sources and resolved packages into

@@ -327,6 +327,30 @@ def f(x: uint256, n: uint256) -> uint256:
         assert actual[0] == actual[1], (n, actual)
 
 
+def test_shift_by_converted_loop_offset_preserves_legacy_results(tmp_path):
+    # 0.2 types `i` as uint256 because of `i == n`, so the convert is not same-type there,
+    # but the migration types the loop as int128, which makes it one.
+    source = """# @version 0.2.15
+MAX_COINS: constant(int128) = 8
+
+@external
+@pure
+def f(x: uint256, n: uint256) -> uint256:
+    packed: uint256 = 0
+    for i in range(MAX_COINS):
+        if i == n:
+            break
+        packed += shift(x, convert(i*8, int128))
+    return packed
+"""
+    rewritten = apply_rules(source, Config(paths=(tmp_path,), target_version="0.4.3"))
+    path = tmp_path / "entry.vy"
+    original = _deploy(path, source, "0.2.15")
+    migrated = _deploy(path, rewritten.source, "0.4.3")
+    for n in (0, 1, 3, 8):
+        assert _call(original, "f(uint256,uint256)", 0xAB, n) == _call(migrated, "f(uint256,uint256)", 0xAB, n)
+
+
 def test_internal_guard_rejects_reentrant_callback(tmp_path):
     deployments = _migration_pair(tmp_path, """# @version 0.3.10
 @external
