@@ -1404,3 +1404,19 @@ def f(x: int256) -> int256:
 
     assert "for i: uint256 in range(1, 50):" in result.source
     assert "term //= (convert(i, int256) + 1)" in result.source
+
+
+def test_long_literal_peer_does_not_abort_the_rewrite(config) -> None:
+    peer = " + ".join(["1"] * 400)
+    source = f"""# @version 0.3.10
+C: constant(int8) = 2
+
+@external
+@pure
+def f() -> bool:
+    return C == {peer}
+"""
+
+    result = apply_rules(source, config(source_version="0.3.10", target_version="0.4.3"))
+
+    assert result.source.startswith("#pragma version 0.4.3\n")

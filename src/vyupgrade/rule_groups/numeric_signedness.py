@@ -16,7 +16,7 @@ from ..analysis import (
     normalize_type,
     parse_source_facts,
 )
-from ..constant_evaluation import eval_integer_constant_expr, integer_constant_values
+from ..constant_evaluation import _MAX_NODES, eval_integer_constant_expr, integer_constant_values
 from ..models import Diagnostic, Fix
 from ..rule_helpers import (
     innermost_non_overlapping as _innermost_non_overlapping,
@@ -461,7 +461,7 @@ def _mixed_signed_unsigned_arithmetic(
                     or inside_convert_call(source, start)
                     or _inside_type_subscript(source, start)
                     or not _inside_array_subscript(source, start, vars_for_line)
-                    or _clause_at(source, start).compares
+                    or _clause_at(source, start).typed_by in ("comparison", "argument")
                 ):
                     continue
                 replacement = f"convert({name}, uint256)"
@@ -933,11 +933,11 @@ def _signed_name_has_unsigned_context(
         and _is_unsigned_integer_type(vars_for_line.get(peer))
     ):
         return False
-    # A comparison's operands take each other's type, not the type the
-    # assignment target or an enclosing array index expects.
-    if clause.compares:
-        return _has_unsigned_context(clause.context, vars_for_line)
-    if _is_unsigned_integer_type(lhs_type) or _inside_array_subscript(line, index, vars_for_line):
+    # The innermost comparison, index or call argument around the name types
+    # it; only when none does may the assignment target.
+    if clause.typed_by == "index" and _inside_array_subscript(line, index, vars_for_line):
+        return True
+    if clause.typed_by is None and _is_unsigned_integer_type(lhs_type):
         return True
     return _has_unsigned_context(clause.context, vars_for_line)
 
@@ -1038,8 +1038,9 @@ def _unsigned_name_signed_arithmetic_target_type(
     expr = clause.text.strip()
     if not re.search(rf"\b{re.escape(name)}\b", expr):
         return None
-    # A comparison's operands take each other's type, not the assignment target's.
-    if _is_signed_integer_type(lhs_type) and not clause.compares:
+    # The assignment target types the name only when no comparison, index or
+    # call argument around it does.
+    if _is_signed_integer_type(lhs_type) and clause.typed_by is None:
         return normalize_type(lhs_type)
     comparison_type = _unsigned_name_signed_comparison_expression_type(
         expr, name, vars_for_line, facts
@@ -1104,6 +1105,10 @@ def _literal_value(expr: str) -> int | None:
     try:
         tree = ast.parse(expr.strip(), mode="eval")
     except SyntaxError:
+        return None
+    # The evaluator rejects anything larger, and folding it could exhaust
+    # the recursion limit.
+    if sum(1 for _ in ast.walk(tree)) > _MAX_NODES:
         return None
     text = ast.unparse(_LiteralMinMaxFolder().visit(tree))
     return eval_integer_constant_expr(text, {}) if _LITERAL_EXPRESSION.fullmatch(text) else None
@@ -1187,35 +1192,65 @@ class _Clause:
     enclosing call, subscript, list or struct brackets. Its text leaves out
     the conditions of ternaries nested in it, which type nothing in it, and
     its context also leaves out shift amounts, call arguments and subscript
-    indexes."""
+    indexes. ``typed_by`` says what gives the name its type: the innermost
+    enclosing ``"comparison"``, ``"index"`` or call ``"argument"``, or None
+    when only the statement (an assignment target, say) can."""
 
     text: str
     context: str
-    compares: bool
+    typed_by: str | None
 
 
 def _clause_at(source: str, start: int) -> _Clause:
     found = _statement_name_tokens(source).get(start)
     if found is None:
-        return _Clause("", "", compares=False)
+        return _Clause("", "", typed_by=None)
     tokens, position = found
     texts = [token.string for token in tokens]
     first = last = position
     while True:
         first = _clause_edge(texts, first, -1)
         last = _clause_edge(texts, last, 1)
-        # An element of the list a membership test searches takes the type
-        # of what it is compared with.
-        compares = _has_top_level_comparison(texts[first : last + 1]) or (
-            _token_at(texts, first - 1) == "[" and _token_at(texts, first - 2) == "in"
-        )
+        compares = _has_top_level_comparison(texts[first : last + 1])
         # Parentheses that only group an operand, as in `(i + 1) == 2`, are
         # part of the enclosing clause.
         if compares or not _grouping_parentheses(texts, first - 1, last + 1):
             clause = tokens[first : last + 1]
             text = " ".join(_statement_text(run) for run in _without_ternary_conditions(clause))
-            return _Clause(text, _context_text(clause), compares=compares)
+            return _Clause(text, _context_text(clause), typed_by=_typed_by(texts, first, last))
         first, last = first - 1, last + 1
+
+
+def _typed_by(texts: list[str], first: int, last: int) -> str | None:
+    """What types the clause ``texts[first:last + 1]``, walking out through
+    the brackets around it. List and tuple elements, `min`/`max` arguments,
+    ternary branches and grouping parentheses take the type of what holds
+    them, so the walk goes on past them."""
+    while not _has_top_level_comparison(texts[first : last + 1]):
+        opener = _enclosing_opener(texts, first)
+        if opener is None:
+            return None
+        if _after_operand(texts, opener) and texts[opener] == "[":
+            return "index"
+        if texts[opener] == "{" or (
+            _after_operand(texts, opener) and texts[opener - 1] not in _TYPED_LIKE_ARGUMENTS
+        ):
+            return "argument"
+        first = _clause_edge(texts, opener, -1)
+        last = _clause_edge(texts, _matching_close(texts, opener), 1)
+    return "comparison"
+
+
+def _enclosing_opener(texts: list[str], first: int) -> int | None:
+    depth = 0
+    for index in range(first - 1, -1, -1):
+        if texts[index] in _CLOSERS:
+            depth += 1
+        elif texts[index] in _OPENERS:
+            if depth == 0:
+                return index
+            depth -= 1
+    return None
 
 
 # Tokens that end a shift amount: operators that bind less tightly than a shift.

@@ -632,6 +632,70 @@ def f(_: uint256) -> uint256:
             assert _outcome(deployment, "f(uint256)", *args) == expected
 
 
+def test_signed_name_anywhere_in_a_membership_list_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f() -> uint256:
+    total: uint256 = 0
+    for i in range(-1, 3):
+        y: uint256 = 2 if 1 in [0, i] else 1
+        z: uint256 = 2 if 1 in ([0, (i)]) else 1
+        total += y + z
+    return total
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 10
+
+
+def test_signed_name_nested_in_a_comparison_operand_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(b: bool) -> uint256:
+    total: uint256 = 0
+    for i in range(-1, 3):
+        y: uint256 = 2 if max(i, 0) == 2 else 1
+        z: uint256 = 2 if (i if b else 0) < 2 else 1
+        total += y + z
+    return total
+""")
+    for args, expected in (((True,), 12), ((False,), 13)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(bool)", *args) == expected
+
+
+def test_innermost_index_types_a_signed_name_in_a_comparison(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(i: int128) -> uint256:
+    a: uint256[3] = [1, 2, 3]
+    if a[i] == 2:
+        return 1
+    return 0
+""")
+    for args, expected in (((1,), 1), ((0,), 0), ((-1,), "revert")):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(int128)", *args) == expected
+
+
+def test_membership_list_inside_an_index_inside_a_comparison_keeps_negative_values(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f() -> uint256:
+    a: uint256[2] = [2, 3]
+    total: uint256 = 0
+    for i in range(-1, 3):
+        y: uint256 = 2 if a[1 if 1 in [0, i] else 0] == 3 else 1
+        total += y
+    return total
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 5
+
+
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])
 def test_tuple_assignment_preserves_signed_membership(tmp_path, index):
     deployments = _migration_pair(tmp_path, f"""# @version 0.3.10
