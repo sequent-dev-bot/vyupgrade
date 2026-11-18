@@ -24,8 +24,9 @@ INTERFACE_AST_FORMAT = "interface_ast_v1"
 LOOP_TYPES_FORMAT = "loop_types_v1"
 SOURCE_EVIDENCE_FORMATS = {
     # Before 0.3.2, constants fold to untyped literals ahead of type checking, and an
-    # unannotated loop variable takes the first candidate type its body accepts.
-    **{f"0.2.{patch}": LOOP_TYPES_FORMAT for patch in range(17)},
+    # unannotated loop variable takes the first candidate type its body accepts. Only
+    # 0.2.9 and later record that type on the loop target.
+    **{f"0.2.{patch}": LOOP_TYPES_FORMAT for patch in range(9, 17)},
     "0.3.0": LOOP_TYPES_FORMAT,
     "0.3.1": LOOP_TYPES_FORMAT,
     "0.3.10": "external_calls_v1",

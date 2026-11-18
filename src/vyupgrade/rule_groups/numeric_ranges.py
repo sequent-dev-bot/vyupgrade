@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import io
 import re
 import tokenize
 import unicodedata
@@ -22,7 +21,8 @@ from ..rule_helpers import (
 )
 from ..rule_registry import Rule, RuleContext, crossing
 from ..source import (
-    lone_cr_as_lf,
+    line_offsets,
+    logical_statement_tokens,
     TextEdit,
     apply_edits,
     find_matching,
@@ -32,6 +32,7 @@ from ..source import (
     span_is_code,
 )
 from ..versions import ensure_version, parse_version
+from .numeric_constant_helpers import retype_integer_operands
 from .numeric_types import (
     is_signed_integer_type as _is_signed_integer_type,
     is_unsigned_integer_type as _is_unsigned_integer_type,
@@ -132,45 +133,25 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
 def _loop_statements(source: str) -> list[tuple[int, str]] | None:
     """Each loop statement's line start offset and loop variable name, in source order.
 
-    Uses Python's tokenizer so that parenthesized targets and headers spanning several
-    lines are found like the compiler finds them. ``None`` if the source does not
-    tokenize or a target is not a single name.
+    Statements come from Python's tokenizer, so parenthesized targets and headers
+    spanning several lines are found like the compiler finds them. ``None`` if a
+    target is not a single name.
     """
-    text = lone_cr_as_lf(source)
-    rows = [0, *(match.end() for match in re.finditer("\n", text))]
+    rows = line_offsets(source)
     statements: list[tuple[int, str]] = []
-    target: list[tokenize.TokenInfo] | None = None
-    target_row = 0
-    at_statement_start = True
-    try:
-        for token in tokenize.generate_tokens(io.StringIO(text).readline):
-            if target is not None:
-                if token.type == tokenize.NAME and token.string == "in":
-                    names = [
-                        part
-                        for part in target
-                        if part.type not in (tokenize.NL, tokenize.COMMENT)
-                        and part.string not in ("(", ")")
-                    ]
-                    if any(part.string == ":" for part in names):
-                        names = names[: [part.string for part in names].index(":")]
-                    if len(names) != 1 or names[0].type != tokenize.NAME:
-                        return None
-                    statements.append((target_row, unicodedata.normalize("NFKC", names[0].string)))
-                    target = None
-                else:
-                    target.append(token)
-                continue
-            if token.type in (tokenize.NL, tokenize.COMMENT):
-                continue
-            if at_statement_start and token.type == tokenize.NAME and token.string == "for":
-                target_row = rows[token.start[0] - 1]
-                target = []
-            at_statement_start = token.type in (
-                tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT
-            )
-    except (tokenize.TokenError, SyntaxError):
-        return None
+    for tokens in logical_statement_tokens(source):
+        if tokens[0].type != tokenize.NAME or tokens[0].string != "for":
+            continue
+        strings = [token.string for token in tokens]
+        end = min(
+            (strings.index(word) for word in ("in", ":") if word in strings), default=len(tokens)
+        )
+        names = [token for token in tokens[1:end] if token.string not in ("(", ")")]
+        if len(names) != 1 or names[0].type != tokenize.NAME:
+            return None
+        statements.append(
+            (rows[tokens[0].start[0] - 1], unicodedata.normalize("NFKC", names[0].string))
+        )
     return statements
 
 
@@ -187,14 +168,19 @@ def _types_loops_by_body(rule_context: RuleContext) -> bool:
 
 
 def _folds_to_literals(iterable: str, constant_values: dict[str, int]) -> bool:
-    """Whether a range's arguments or a list's elements are only literals and constants."""
+    """Whether a range's positional arguments or a list's elements are only literals and constants."""
     if re.match(r"range\s*\(", iterable) and iterable.endswith(")"):
-        inner = iterable[iterable.index("(") + 1 : -1]
+        parts = split_top_level_args(iterable[iterable.index("(") + 1 : -1])
+        parts = [part for part in parts or () if not re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*=", part)]
     elif iterable.startswith("[") and iterable.endswith("]"):
-        inner = iterable[1:-1]
+        parts = split_top_level_args(iterable[1:-1]) or []
     else:
         return False
-    return all(name in constant_values for name in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*", inner))
+    return all(
+        name in constant_values
+        for part in parts
+        for name in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*", part)
+    )
 
 
 def _literal_list_as(
@@ -202,8 +188,7 @@ def _literal_list_as(
 ) -> str | None:
     """A literal list whose elements have the loop variable's type, or ``None``.
 
-    Before 0.3.2 constants in the list folded to literals the loop type accepted, so a
-    constant of another integer type is converted; other mismatches are left alone.
+    Before 0.3.2 constants in the list folded to literals the loop type accepted.
     """
     if not iterable.endswith("]"):
         return None
@@ -211,16 +196,13 @@ def _literal_list_as(
     if elements is None:
         return None
     converted = []
-    for raw_element in elements:
-        element = raw_element.strip()
-        names = re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*", element)
-        types = {normalize_type(vars_for_line.get(name) or "") for name in names}
-        if not names or types == {var_type}:
-            converted.append(element)
-        elif len(types) == 1 and all(name in constant_values for name in names):
-            converted.append(f"convert({element}, {var_type})")
-        else:
+    for element in elements:
+        replacement = retype_integer_operands(
+            element.strip(), var_type, vars_for_line, constant_values, lambda _declared: False
+        )
+        if replacement is None:
             return None
+        converted.append(replacement)
     return f"[{', '.join(converted)}]"
 
 

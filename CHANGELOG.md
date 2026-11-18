@@ -9,14 +9,16 @@
   `int256`; taking `int128` from the constant made a narrowing
   `convert(i * 8, int128)` a same-type conversion the target rejected. List
   constants of another type are converted to the reported type. Without that
-  evidence (an explicit `--source-vyper` executable, a failed source compile),
+  evidence (Vyper before 0.2.9, which doesn't record the type, an explicit
+  `--source-vyper` executable, a failed source compile),
   a loop over only literals and constants is left unannotated for the target
   compiler to reject rather than guessed; the version of the compiler that
   accepted the file decides, so a file without a pragma counts too. A degraded
   source compile (no layout before 0.2.16) now keeps its rewrite evidence.
 - Convert a constant range bound to a signed loop variable's type too
-  (`VY056`), including a `uint256` constant whose value fits, but never an
-  attribute such as `s.N` that shares a constant's name; and stop casting an
+  (`VY056`), including a `uint256` constant whose value fits. Constant
+  arithmetic that would overflow in the loop type becomes its folded value,
+  and calls, attributes and subscripts in a bound are left alone; and stop casting an
   unsigned loop variable to a signed constant's type in comparisons such as
   `x + 1 == N`, where the constant is already cast to the loop variable's type.
 

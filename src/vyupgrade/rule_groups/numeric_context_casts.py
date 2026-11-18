@@ -11,7 +11,7 @@ from ..analysis import (
     iterable_element_type,
     normalize_type,
 )
-from ..constant_evaluation import integer_constant_values
+from ..constant_evaluation import eval_integer_constant_expr, integer_constant_values
 from ..models import Diagnostic, Fix
 from ..rule_helpers import innermost_non_overlapping as _innermost_non_overlapping
 from ..rule_registry import Rule, RuleContext, crossing
@@ -31,9 +31,8 @@ from .numeric_casts import (
     cast_integer_arg_to_expected,
     inside_convert_call,
 )
-from .numeric_constant_helpers import constant_range_iteration_bound
+from .numeric_constant_helpers import constant_range_iteration_bound, retype_integer_operands
 from .numeric_types import (
-    integer_value_fits_type,
     is_signed_integer_type as _is_signed_integer_type,
     is_unsigned_integer_type as _is_unsigned_integer_type,
 )
@@ -190,52 +189,40 @@ def _unsigned_range_bound_signed_constants(
         line_no = line_number(source, match.start())
         vars_for_line = facts.vars_at_line(line_no)
         converted = False
-        for name, type_name in sorted(
-            vars_for_line.items(), key=lambda item: len(item[0]), reverse=True
-        ):
-            normalized_type = normalize_type(type_name)
-            # Before 0.3.2 a constant folds to a literal, so a signed loop may take a
-            # uint256 constant bound whose value fits.
-            folded_constant = (
-                _is_signed_integer_type(loop_type)
-                and normalized_type == "uint256"
-                and name in constant_values
-                and integer_value_fits_type(constant_values[name], loop_type)
+        retyped = []
+        for start, end, arg in positional_spans:
+            replacement = retype_integer_operands(
+                arg,
+                loop_type,
+                vars_for_line,
+                constant_values,
+                lambda declared: _is_signed_integer_type(declared)
+                or _is_narrow_unsigned_integer_type(declared),
             )
-            if not (
-                _is_signed_integer_type(normalized_type)
-                or _is_narrow_unsigned_integer_type(normalized_type)
-                or folded_constant
-            ):
-                continue
-            if normalized_type == loop_type:
-                continue
-            for name_match in re.finditer(rf"\b{re.escape(name)}\b", args):
-                if not any(
-                    start <= name_match.start() and name_match.end() <= end
-                    for start, end, _arg in positional_spans
-                ):
-                    continue
-                if args[: name_match.start()].rstrip().endswith("."):
-                    # An attribute such as a struct field, not this name.
-                    continue
-                start = args_start + name_match.start()
-                end = args_start + name_match.end()
-                if inside_convert_call(source, start) or not span_is_code(mask, start, end):
-                    continue
-                replacement = f"convert({name}, {loop_type})"
-                edits.append(TextEdit(start, end, replacement))
+            if replacement is None:
+                break
+            if replacement != arg:
+                retyped.append((start, end, arg, replacement))
+        else:
+            for start, end, arg, replacement in retyped:
+                edits.append(TextEdit(args_start + start, args_start + end, replacement))
                 converted = True
                 fixes.append(
                     Fix(
                         "VY056",
                         line_no,
                         "converted integer range bound to the loop variable type",
-                        name,
+                        arg,
                         replacement,
                     )
                 )
-        if converted and not has_bound_keyword:
+        replaced = {start: replacement for start, _end, _arg, replacement in retyped}
+        # A range of literals takes no bound=.
+        literal_range = all(
+            eval_integer_constant_expr(replaced.get(start, arg), {}) is not None
+            for start, _end, arg in positional_spans
+        )
+        if converted and not has_bound_keyword and not literal_range:
             bound = constant_range_iteration_bound(
                 ", ".join(arg for _start, _end, arg in positional_spans), constant_values
             )

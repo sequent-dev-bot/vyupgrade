@@ -335,6 +335,10 @@ def test_legacy_loop_types_come_from_the_source_compiler(tmp_path):
 MAX_COINS: constant(int128) = 8
 WIDTH: constant(uint256) = 8
 PAIR: constant(int128) = 2
+WIDE: constant(uint256) = 2**127 - 1
+ONE: constant(uint256) = 1
+TWO: constant(uint256) = 2
+BELOW: constant(int128) = -2
 
 @external
 @pure
@@ -343,6 +347,33 @@ def listed(x: uint256) -> uint256:
     for i in [PAIR, 3]:
         total += x * i
     return total
+
+@external
+@pure
+def listed_signed(x: uint256) -> uint256:
+    total: uint256 = 0
+    for i in [ONE - TWO + 5, 3]:
+        total += shift(x, -8 * i) % 256
+    return total
+
+@external
+@pure
+def folded(x: uint256) -> uint256:
+    total: uint256 = 0
+    for i in range(WIDE + ONE - WIDE + 2):
+        j: int128 = i
+        total += shift(x, j)
+    return total
+
+@external
+@pure
+def folded_negative(n: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(BELOW + 10):
+        if i == n:
+            break
+        count += 1
+    return count
 
 @external
 @pure
@@ -389,6 +420,9 @@ def offset(start: uint256) -> uint256:
     assert "for i: int256 in range(convert(MAX_COINS, int256), bound=8):" in migrated_source
     assert "for i: int256 in range(convert(WIDTH, int256), bound=8):" in migrated_source
     assert "for i: uint256 in [convert(PAIR, uint256), 3]:" in migrated_source
+    assert "for i: int256 in [convert(ONE, int256) - convert(TWO, int256) + 5, 3]:" in migrated_source
+    assert "for i: int128 in range(3" in migrated_source
+    assert "for i: uint256 in range(8" in migrated_source
     original = _deploy(path, source, "0.2.15")
     migrated = _deploy(path, migrated_source, "0.4.3")
     calls = [
@@ -396,6 +430,9 @@ def offset(start: uint256) -> uint256:
         ("signed(uint256)", 0xABCDEF),
         ("signed_wide(uint256)", 0xABCDEF),
         ("listed(uint256)", 5),
+        ("listed_signed(uint256)", 0xABCDEF),
+        ("folded(uint256)", 1),
+        *(("folded_negative(uint256)", n) for n in (0, 3, 8, 9)),
         *(("offset(uint256)", start) for start in (0, 3, 7, 8)),
     ]
     for signature, *args in calls:
@@ -421,6 +458,14 @@ def narrowed(x: uint256, n: uint256) -> uint256:
 
 @external
 @pure
+def paired(x: uint256) -> uint256:
+    packed: uint256 = 0
+    for i in range(MAX_COINS, MAX_COINS + 2):
+        packed += shift(x, convert(i * 8, int128))
+    return packed
+
+@external
+@pure
 def offset(start: uint256) -> uint256:
     total: uint256 = 0
     for i in range(start, start + 2):
@@ -438,7 +483,27 @@ def offset(start: uint256) -> uint256:
     rewrite = batch.files[0].rewrite
 
     assert "    for i in range(MAX_COINS):" in rewrite.source
+    assert "    for i in range(MAX_COINS, MAX_COINS + 2" in rewrite.source
     assert "    for i: uint256 in range(start, start + 2, bound=2):" in rewrite.source
+
+
+def test_loops_of_compilers_without_loop_types_stay_untyped(tmp_path):
+    # Vyper before 0.2.9 does not record the type it chose for a loop variable.
+    source = """# @version 0.2.4
+@external
+@pure
+def f(x: uint256) -> uint256:
+    total: uint256 = 0
+    for i in range(2):
+        total += shift(x, i)
+    return total
+"""
+    path = tmp_path / "entry.vy"
+    path.write_text(source, encoding="utf-8")
+    config = Config(paths=(path,), target_version="0.4.3")
+    batch = engine.prepare_migrations([engine.bounded_migration_request(path, source, config)], config)
+
+    assert "    for i in range(2):" in batch.files[0].rewrite.source
 
 
 def test_internal_guard_rejects_reentrant_callback(tmp_path):
