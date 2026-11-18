@@ -1442,3 +1442,41 @@ def f() -> uint256:
     result = apply_rules(source, config(source_version="0.3.10", target_version="0.4.3"))
 
     assert "convert(i, uint256)" not in result.source
+
+
+def test_signed_name_compared_with_a_builtin_call_on_a_constant_is_not_cast(config) -> None:
+    source = """# @version 0.3.10
+B: constant(Bytes[2]) = b"ab"
+
+@external
+@pure
+def f() -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i < len(B):
+            count += 1
+    return count
+"""
+
+    result = apply_rules(source, config(source_version="0.3.10", target_version="0.4.3"))
+
+    assert "convert(i, uint256)" not in result.source
+
+
+def test_folded_unsigned_constant_gives_a_signed_operand_no_unsigned_context(config) -> None:
+    source = """# @version 0.3.10
+C: constant(uint256) = 2
+
+@external
+@pure
+def f() -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i + (C + 1) == 2:
+            count += 1
+    return count
+"""
+
+    result = apply_rules(source, config(source_version="0.3.10", target_version="0.4.3"))
+
+    assert "convert(i, uint256)" not in result.source

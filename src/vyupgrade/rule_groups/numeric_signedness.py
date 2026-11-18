@@ -401,7 +401,9 @@ def _mixed_signed_unsigned_arithmetic(
                     _inside_attribute_access(source, start, end)
                     or _inside_nested_convert_call(source, start, match.end() - 1)
                     or _inside_type_subscript(source, start)
-                    or not _has_unsigned_context(_clause_at(source, start).context, vars_for_line)
+                    or not _has_unsigned_context(
+                        _clause_at(source, start).context, _without_constants(vars_for_line, facts)
+                    )
                 ):
                     continue
                 replacement = f"convert({name}, uint256)"
@@ -940,7 +942,20 @@ def _signed_name_has_unsigned_context(
         return True
     if clause.typed_by is None and _is_unsigned_integer_type(lhs_type):
         return True
-    return _has_unsigned_context(clause.context, vars_for_line)
+    return _has_unsigned_context(clause.context, _without_constants(vars_for_line, facts))
+
+
+def _module_constants(facts: SourceFacts) -> set[str]:
+    return {name for name, type_name in facts.global_vars.items() if type_name.startswith("constant(")}
+
+
+def _without_constants(vars_for_line: dict[str, str], facts: SourceFacts) -> dict[str, str]:
+    """The variables without module constants. In source that compiles, a
+    constant in the same operand or comparison as a signed name has been
+    folded into a literal of the name's type, so it gives no unsigned
+    context."""
+    constants = _module_constants(facts)
+    return {name: type_name for name, type_name in vars_for_line.items() if name not in constants}
 
 
 def _has_unsigned_context(line: str, vars_for_line: dict[str, str]) -> bool:
@@ -1090,7 +1105,7 @@ def _unsigned_comparison_target_type_at(
         if _integer_value_fits_type(value, vars_for_line.get(name) or ""):
             return None
         return "uint256" if _integer_value_fits_type(value, "uint256") else None
-    if _folds_to_literal(other):
+    if _folds_to_literal(other, _module_constants(facts)):
         # The source compiler folds it to a literal, which takes the name's
         # type; without its value, cast nothing.
         return None
@@ -1119,17 +1134,23 @@ def _literal_value(expr: str) -> int | None:
     return eval_integer_constant_expr(text, {}) if _LITERAL_EXPRESSION.fullmatch(text) else None
 
 
-def _folds_to_literal(expr: str) -> bool:
-    """Whether ``expr`` calls builtins on literals only (`len(b"ab")`), which
-    the source compiler folds to a literal."""
+def _folds_to_literal(expr: str, constants: set[str]) -> bool:
+    """Whether ``expr`` is built from literals, module constants and builtin
+    calls on them, with at least one constant or call (`len(b"ab")`,
+    `C + 1`), which the source compiler folds to a literal."""
     try:
         tree = ast.parse(expr.strip(), mode="eval")
     except (SyntaxError, RecursionError):
         return False
     nodes = list(ast.walk(tree))
     callees = {id(node.func) for node in nodes if isinstance(node, ast.Call)}
-    return bool(callees) and not any(
-        isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in callees for node in nodes
+    names = [
+        node
+        for node in nodes
+        if isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in callees
+    ]
+    return bool(callees or names) and all(
+        isinstance(node, ast.Name) and node.id in constants for node in names
     )
 
 
