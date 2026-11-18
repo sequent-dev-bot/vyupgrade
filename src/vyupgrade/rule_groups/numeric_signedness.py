@@ -793,6 +793,8 @@ def _signed_convert_mixed_integer_casts(
                 source, start, facts
             ) or _unsigned_external_call_arg_context(
                 source, start, name, facts, vars_for_line
+            ) or not _expression_has_signed_integer(
+                _clause_at(source, start).context, vars_for_line, facts
             ):
                 continue
             replacement = f"convert({name}, {normalize_type(target_type)})"
