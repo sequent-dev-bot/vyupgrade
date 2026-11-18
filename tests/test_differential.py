@@ -329,7 +329,7 @@ def f(y: int128) -> uint256:
             assert _outcome(deployment, "f(int128)", y) == expected
 
 
-def test_signed_loop_comparison_in_later_clause_drops_the_unsigned_cast(tmp_path):
+def test_signed_loop_comparison_with_signed_conversion_in_later_clause_keeps_values(tmp_path):
     deployments = _migration_pair(tmp_path, """# @version 0.3.10
 @external
 @pure
@@ -365,7 +365,7 @@ def f(x: uint256, y: int128) -> uint256:
             assert _outcome(deployment, "f(uint256,int128)", *args) == expected
 
 
-def test_signed_cleanup_keeps_the_cast_against_a_ternary_with_a_signed_condition(tmp_path):
+def test_explicit_unsigned_conversion_of_a_signed_loop_index_is_kept(tmp_path):
     deployments = _migration_pair(tmp_path, """# @version 0.3.10
 @external
 @pure
@@ -375,9 +375,19 @@ def f(x: uint256) -> uint256:
         if (convert(i, uint256) == (1 if convert(x, int256) > 0 else 2)):
             count += 1
     return count
+
+@external
+@pure
+def g(x: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if (convert(i, uint256) == [1, 2][convert(x, int256)]):
+            count += 1
+    return count
 """)
     for deployment in deployments:
         assert _outcome(deployment, "f(uint256)", 1) == "revert"
+        assert _outcome(deployment, "g(uint256)", 0) == "revert"
 
 
 def test_unsigned_name_in_a_nested_ternary_condition_keeps_negative_values(tmp_path):
@@ -490,6 +500,52 @@ def f() -> bool:
 """)
     for deployment in deployments:
         assert _outcome(deployment, "f()") == 0
+
+
+def test_subscript_index_types_no_signed_comparison_operand(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(x: uint256) -> uint256:
+    count: uint256 = 0
+    for i in range(-1, 3):
+        if i + 1 == [2, 2][x]:
+            count += 1
+    return count
+""")
+    for x in (0, 1):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(uint256)", x) == 1
+
+
+def test_signed_target_types_no_unsigned_comparison_operand(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+LIMIT: immutable(uint256)
+
+@external
+def __init__():
+    LIMIT = max_value(uint256)
+
+@external
+@view
+def f() -> int256:
+    r: int256 = 1 if LIMIT > 0 and LIMIT - 1 > 0 else 0
+    return r
+""")
+    for deployment in deployments:
+        assert _outcome(deployment, "f()") == 1
+
+
+def test_signed_conversion_leaves_a_shift_amount_unsigned(tmp_path):
+    deployments = _migration_pair(tmp_path, """# @version 0.3.10
+@external
+@pure
+def f(s: int256, x: uint256) -> int8:
+    return convert(1 if s << x == 0 else 2, int8)
+""")
+    for args, expected in (((0, 0), 1), ((1, 1), 2), ((-1, 3), 2)):
+        for deployment in deployments:
+            assert _outcome(deployment, "f(int256,uint256)", *args) == expected
 
 
 @pytest.mark.parametrize("index", ["1", "BOOL_MEMBER"])

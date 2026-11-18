@@ -221,8 +221,8 @@ def _mixed_signed_unsigned_arithmetic(
                 ):
                     continue
                 loop_type = normalize_type(vars_for_line.get(name) or "")
-                clause = _clause_at(source, start).text
-                comparison_peer = _comparison_peer(clause, name)
+                clause = _clause_at(source, start)
+                comparison_peer = _comparison_peer(clause.text, name)
                 if (
                     comparison_peer in constant_values
                     and comparison_peer in facts.global_vars
@@ -248,7 +248,7 @@ def _mixed_signed_unsigned_arithmetic(
                     )
                 )
                 target_type = (
-                    _signed_comparison_target_type(clause, name, vars_for_line)
+                    _signed_comparison_target_type(clause.text, name, vars_for_line)
                     or _signed_comparison_target_type_at(
                         source, start, name, vars_for_line
                     )
@@ -309,13 +309,13 @@ def _mixed_signed_unsigned_arithmetic(
                 ):
                     continue
                 local_expr = _local_expression(source, start)
-                clause = _clause_at(source, start).text
+                clause = _clause_at(source, start)
                 comparison_target = _signed_comparison_target_type_at(
                     source, start, name, vars_for_line
                 )
                 arithmetic_target = (
                     None
-                    if _comparison_peer(clause, name) is not None
+                    if _comparison_peer(clause.text, name) is not None
                     else _unsigned_name_signed_arithmetic_target_type(
                         clause, name, lhs_type, vars_for_line, facts
                     )
@@ -474,14 +474,10 @@ def _mixed_signed_unsigned_arithmetic(
     edits, fixes = _drop_literal_comparison_casts(source, facts, edits, fixes)
     selected_edits, selected_fixes = _innermost_non_overlapping(edits, fixes)
     current = apply_edits(source, selected_edits)
-    cleanup_edits, cleanup_fixes = _signed_loop_comparison_convert_cleanup(
-        current, parse_source_facts(current), code_mask(current)
-    )
-    current = apply_edits(current, cleanup_edits)
     return_edits, return_fixes = _signed_return_unsigned_unsafe_shift_casts(
         current, parse_source_facts(current), code_mask(current)
     )
-    return apply_edits(current, return_edits), selected_fixes + cleanup_fixes + return_fixes, []
+    return apply_edits(current, return_edits), selected_fixes + return_fixes, []
 
 
 def _max_value_comparison_casts(
@@ -568,74 +564,6 @@ def _max_value_bitwise_casts(
                 )
             )
     return edits, fixes
-
-
-def _signed_loop_comparison_convert_cleanup(
-    source: str, facts: SourceFacts, mask: list[bool]
-) -> tuple[list[TextEdit], list[Fix]]:
-    edits: list[TextEdit] = []
-    fixes: list[Fix] = []
-    for match in re.finditer(r"\bconvert\s*\(", source):
-        if not span_is_code(mask, match.start(), match.end()):
-            continue
-        close = find_matching(source, match.end() - 1)
-        if close is None:
-            continue
-        args = split_top_level_arg_spans(source[match.end() : close])
-        if args is None or len(args) != 2:
-            continue
-        _name_start, _name_end, name = args[0]
-        _target_start, _target_end, target_type = args[1]
-        name = name.strip()
-        if (
-            target_type.strip() != "uint256"
-            or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
-            or not span_is_code(mask, match.start(), close + 1)
-        ):
-            continue
-        line_no = line_number(source, match.start())
-        if name not in facts.loop_vars_at_line(line_no):
-            continue
-        vars_for_line = facts.vars_at_line(line_no)
-        loop_type = vars_for_line.get(name)
-        if not _is_signed_integer_type(loop_type):
-            continue
-        converted = source[match.start() : close + 1]
-        peer = _comparison_peer_for_expression(_clause_at(source, match.start()).text, converted)
-        if peer is None or not _expression_is_signed_integer(peer, vars_for_line, facts):
-            continue
-        edits.append(TextEdit(match.start(), close + 1, name))
-        fixes.append(
-            Fix(
-                "VY052",
-                line_no,
-                "removed unsigned cast from signed loop comparison",
-                converted,
-                name,
-            )
-        )
-    return edits, fixes
-
-
-def _comparison_peer_for_expression(expr: str, target: str) -> str | None:
-    match = re.match(r"(.+?)\s*(==|!=|<=|>=|<|>)\s*(.+)\Z", expr)
-    if match is None:
-        return None
-    left, _op, right = (part.strip() for part in match.groups())
-    if left == target:
-        return right
-    if right == target:
-        return left
-    return None
-
-
-def _expression_is_signed_integer(
-    expr: str, vars_for_line: dict[str, str], facts: SourceFacts
-) -> bool:
-    inferred = infer_expr_type(expr, vars_for_line, facts)
-    if _is_signed_integer_type(inferred):
-        return True
-    return bool(re.search(r"\bconvert\s*\([^,\n]+,\s*int\d*\s*\)", expr))
 
 
 def _narrow_unsigned_comparison_arithmetic_casts(
@@ -793,7 +721,7 @@ def _signed_convert_mixed_integer_casts(
                 source, start, facts
             ) or _unsigned_external_call_arg_context(
                 source, start, name, facts, vars_for_line
-            ) or not _expression_has_signed_integer(
+            ) or _inside_shift_operator_amount(source, start) or not _expression_has_signed_integer(
                 _clause_at(source, start).context, vars_for_line, facts
             ):
                 continue
@@ -1101,12 +1029,13 @@ def _unsigned_name_signed_division_target_type(
 
 
 def _unsigned_name_signed_arithmetic_target_type(
-    expr: str, name: str, lhs_type: str | None, vars_for_line: dict[str, str], facts: SourceFacts
+    clause: _Clause, name: str, lhs_type: str | None, vars_for_line: dict[str, str], facts: SourceFacts
 ) -> str | None:
-    expr = expr.strip()
+    expr = clause.text.strip()
     if not re.search(rf"\b{re.escape(name)}\b", expr):
         return None
-    if _is_signed_integer_type(lhs_type):
+    # A comparison's operands take each other's type, not the assignment target's.
+    if _is_signed_integer_type(lhs_type) and not clause.compares:
         return normalize_type(lhs_type)
     comparison_type = _unsigned_name_signed_comparison_expression_type(
         expr, name, vars_for_line, facts
@@ -1226,7 +1155,8 @@ class _Clause:
     between the nearest lower-precedence tokens around it, within its
     enclosing call, subscript, list or struct brackets. Its text leaves out
     the conditions of ternaries nested in it, which type nothing in it, and
-    its context also leaves out shift amounts and call arguments."""
+    its context also leaves out shift amounts, call arguments and subscript
+    indexes."""
 
     text: str
     context: str
@@ -1261,8 +1191,9 @@ _TYPED_BY_ARGUMENT = frozenset({"convert", "max_value", "min_value", "empty"})
 
 def _context_text(tokens: list[tokenize.TokenInfo]) -> str:
     """The text of ``tokens`` without what doesn't type their value: nested
-    ternary conditions, shift amounts and call arguments. A call to a
-    builtin typed by its argument keeps that argument (`convert(_, uint256)`)."""
+    ternary conditions, shift amounts, call arguments and subscript indexes.
+    A call to a builtin typed by its argument keeps that argument
+    (`convert(_, uint256)`)."""
     texts = [token.string for token in tokens]
     pieces: list[str] = []
     run: list[tokenize.TokenInfo] = []
@@ -1274,14 +1205,15 @@ def _context_text(tokens: list[tokenize.TokenInfo]) -> str:
             run = []
             position = _skip_operand(texts, position)
             continue
-        if text == "(" and _call_parenthesis(texts, position):
+        if text in ("(", "[") and _after_operand(texts, position):
             close = _matching_close(texts, position)
-            callee = run.pop().string if run else ""
-            pieces.append(_statement_text(run) if run else "")
+            callee = texts[position - 1]
+            kept = ""
+            if text == "(" and callee in _TYPED_BY_ARGUMENT:
+                arguments = _top_level_arguments(tokens, position + 1, close)
+                kept = "_, " * (len(arguments) - 1) + arguments[-1] if arguments else ""
+            pieces.append((_statement_text(run) if run else "") + text + kept + texts[close])
             run = []
-            arguments = _top_level_arguments(tokens, position + 1, close)
-            kept = "_, " * (len(arguments) - 1) + arguments[-1] if arguments else ""
-            pieces.append(f"{callee}({kept if callee in _TYPED_BY_ARGUMENT else ''})")
             position = close + 1
             continue
         run.append(tokens[position])
@@ -1313,6 +1245,18 @@ def _skip_operand(texts: list[str], position: int) -> int:
             return position
         position += 1
     return position
+
+
+def _inside_shift_operator_amount(source: str, start: int) -> bool:
+    found = _statement_name_tokens(source).get(start)
+    if found is None:
+        return False
+    tokens, position = found
+    texts = [token.string for token in tokens]
+    return any(
+        text in ("<<", ">>") and index < position < _skip_operand(texts, index)
+        for index, text in enumerate(texts)
+    )
 
 
 def _matching_close(texts: list[str], position: int) -> int:
@@ -1402,11 +1346,12 @@ def _grouping_parentheses(texts: list[str], open_position: int, close_position: 
     return (
         _token_at(texts, open_position) == "("
         and _token_at(texts, close_position) == ")"
-        and not _call_parenthesis(texts, open_position)
+        and not _after_operand(texts, open_position)
     )
 
 
-def _call_parenthesis(texts: list[str], open_position: int) -> bool:
+def _after_operand(texts: list[str], open_position: int) -> bool:
+    """Whether the bracket at ``open_position`` calls or subscripts what precedes it."""
     before = _token_at(texts, open_position - 1)
     return before is not None and (
         before in (")", "]") or (before.isidentifier() and not keyword.iskeyword(before))
