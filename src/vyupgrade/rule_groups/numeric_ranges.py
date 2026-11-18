@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from ..ast_facts import CompilerSource
 from ..analysis import (
     SourceFacts,
     infer_expr_type,
@@ -49,29 +50,38 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
         r"^([ \t]*)for[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+in[ \t]+(.+?):", re.MULTILINE
     )
     inferred_loop_types: dict[int, str] = {}
+    loops = [
+        match
+        for match in pattern.finditer(source)
+        if _line_match_starts_outside_string(source, mask, match.start())
+    ]
+    source_types = _source_loop_types(rule_context, [match.group(2) for match in loops])
 
-    for match in pattern.finditer(source):
-        if not _line_match_starts_outside_string(source, mask, match.start()):
-            continue
+    for index, match in enumerate(loops):
         iterable = match.group(3).strip()
         if ":" in source[match.start() : match.end()].split(" in ", 1)[0]:
             continue
         line = line_number(source, match.start())
         vars_for_line = facts.vars_at_line(line, inferred_loop_types)
         flag_member_list = _literal_flag_member_list(iterable, flag_member_values)
+        source_type = source_types[index] if source_types is not None else None
+        guessed = not is_integer_type(source_type)
         if flag_member_list is not None:
             var_type = "uint256"
             annotated_iterable = flag_member_list.replacement
+        elif not guessed:
+            var_type = source_type
+            annotated_iterable = iterable
         else:
             var_type = _loop_var_type(iterable, vars_for_line, facts)
             annotated_iterable = iterable
         if var_type is None:
             continue
-        if var_type == "uint256" and _range_iterable_has_literal_bounds(iterable):
+        if guessed and var_type == "uint256" and _range_iterable_has_literal_bounds(iterable):
             var_type = _narrow_unsigned_range_loop_operand_type(
                 source[match.end() :], match.group(2), vars_for_line
             ) or var_type
-        if var_type == "int256" and _range_iterable_has_leading_negative_start(iterable):
+        if guessed and var_type == "int256" and _range_iterable_has_leading_negative_start(iterable):
             var_type = _negative_range_loop_operand_type(
                 source[match.end() :], match.group(2), vars_for_line
             ) or var_type
@@ -90,6 +100,33 @@ def _typed_range_loops(rule_context: RuleContext) -> tuple[str, list[Fix], list[
         inferred_loop_types[line] = var_type
 
     return apply_edits(source, edits), fixes, []
+
+
+def _source_loop_types(rule_context: RuleContext, names: list[str]) -> list[str] | None:
+    """The source compiler's loop variable types, one per loop in ``names`` order, if known.
+
+    VY070 uses only the integer ones: those are what the compiler infers from the loop body.
+
+    Before 0.3.2 the compiler folds constants into untyped literals and gives an unannotated
+    loop variable the first candidate type its body accepts, which source text cannot predict.
+    The evidence lists every loop in source order, so it applies only when the loop variable
+    names still line up one for one.
+    """
+    evidence = rule_context.compiler_facts.loop_types
+    original = rule_context.original_source
+    if not isinstance(evidence, dict) or original is None:
+        return None
+    if not CompilerSource(original).matches_digest(evidence.get("source_sha256sum")):
+        return None
+    loops = evidence.get("loops")
+    if not isinstance(loops, list) or not all(isinstance(loop, dict) for loop in loops):
+        return None
+    types = [loop.get("type") for loop in loops]
+    if [loop.get("name") for loop in loops] != names or not all(
+        isinstance(type_name, str) and type_name for type_name in types
+    ):
+        return None
+    return types
 
 
 def _flag_or_enum_return_casts(

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from vyupgrade.ast_facts import compiler_source_sha256
+from vyupgrade.models import CompilerFacts
 from vyupgrade.rules import apply_rules
 
 
@@ -716,3 +718,58 @@ def f(stop: uint256):
 
     assert "range(stop, bound=" not in result.source
     assert any(diag.rule == "VYD014" for diag in result.diagnostics)
+
+
+LEGACY_LOOPS = """# @version 0.2.15
+MAX_COINS: constant(int128) = 8
+
+@external
+@pure
+def f(x: uint256, n: uint256, start: uint256) -> uint256:
+    total: uint256 = 0
+    for i in range(MAX_COINS):
+        if i == n:
+            break
+        total += shift(x, convert(i * 8, int128))
+    for j in range(MAX_COINS):
+        total += shift(x, -8 * j)
+    for k in range(start, start + MAX_COINS):
+        if k + 1 == MAX_COINS:
+            break
+        total += k
+    return total
+"""
+
+
+def _legacy_loop_facts(source: str, names: list[str], types: list[str]) -> CompilerFacts:
+    loops = [
+        {"line": line, "column": 4, "name": name, "type": type_name}
+        for line, name, type_name in zip((8, 12, 14), names, types, strict=True)
+    ]
+    return CompilerFacts(
+        loop_types={"source_sha256sum": compiler_source_sha256(source), "loops": loops}
+    )
+
+
+def test_legacy_loop_types_follow_source_compiler_evidence(config) -> None:
+    facts = _legacy_loop_facts(LEGACY_LOOPS, ["i", "j", "k"], ["uint256", "int256", "uint256"])
+
+    result = apply_rules(LEGACY_LOOPS, config(target_version="0.4.3"), compiler_facts=facts)
+
+    assert "for i: uint256 in range(convert(MAX_COINS, uint256), bound=8):" in result.source
+    assert "shift(x, convert(i * 8, int128))" not in result.source
+    assert "convert(convert(i * 8, int128), uint256)" in result.source
+    assert "for j: int256 in range(convert(MAX_COINS, int256), bound=8):" in result.source
+    assert "for k: uint256 in range(start, start + convert(MAX_COINS, uint256), bound=8):" in result.source
+    assert "if k + 1 == convert(MAX_COINS, uint256):" in result.source
+    assert "convert(k, int128)" not in result.source
+
+
+def test_legacy_loop_types_ignore_evidence_that_does_not_line_up(config) -> None:
+    misnamed = _legacy_loop_facts(LEGACY_LOOPS, ["i", "k", "j"], ["uint256", "int256", "uint256"])
+    stale = _legacy_loop_facts(LEGACY_LOOPS + "\n", ["i", "j", "k"], ["uint256", "int256", "uint256"])
+
+    for facts in (misnamed, stale):
+        result = apply_rules(LEGACY_LOOPS, config(target_version="0.4.3"), compiler_facts=facts)
+        assert "for i: int128 in range(MAX_COINS):" in result.source
+        assert "for j: int128 in range(MAX_COINS):" in result.source

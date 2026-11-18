@@ -166,7 +166,7 @@ def _unsigned_range_bound_signed_constants(
     edits: list[TextEdit] = []
     constant_values = integer_constant_values(source, rule_context.compiler_facts.ast)
     for match in re.finditer(
-        r"\bfor\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*(?P<loop_type>uint(?:\d+)?)\s+in\s+range\s*\(",
+        r"\bfor\s+[A-Za-z_][A-Za-z0-9_]*\s*:\s*(?P<loop_type>u?int(?:\d+)?)\s+in\s+range\s*\(",
         source,
     ):
         if not span_is_code(mask, match.start(), match.end()):
@@ -217,7 +217,7 @@ def _unsigned_range_bound_signed_constants(
                     Fix(
                         "VY056",
                         line_no,
-                        "converted integer range bound for unsigned loop variable",
+                        "converted integer range bound to the loop variable type",
                         name,
                         replacement,
                     )
@@ -233,7 +233,7 @@ def _unsigned_range_bound_signed_constants(
                     Fix(
                         "VY056",
                         line_no,
-                        "added literal bound for converted unsigned range",
+                        "added literal bound for converted range",
                         "",
                         replacement,
                     )

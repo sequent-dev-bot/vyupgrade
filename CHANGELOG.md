@@ -2,10 +2,18 @@
 
 ## Unreleased
 
-- Remove a `convert(...)` around `+ - * / %` integer arithmetic that already has
-  the target type (`VY051`), such as `convert(i*8, int128)` once a legacy
-  `range` loop variable is typed `int128`; the target compiler rejected it as a
-  same-type conversion.
+- Annotate loop variables in sources for Vyper before 0.3.2 with the type the
+  source compiler gave them (`VY070`). Those compilers fold constants into
+  untyped literals and type a loop variable by its body, so
+  `for i in range(MAX_COINS)` with an `int128` constant could be `uint256` or
+  `int256`; taking `int128` from the constant made a narrowing
+  `convert(i * 8, int128)` a same-type conversion the target rejected. A
+  degraded source compile (no layout before 0.2.16) now keeps its rewrite
+  evidence.
+- Convert a constant range bound to a signed loop variable's type too
+  (`VY056`), and stop casting an unsigned loop variable to a signed constant's
+  type in comparisons such as `x + 1 == N`, where the constant is already cast
+  to the loop variable's type.
 
 ## 0.11.0 - 2026-11-18
 

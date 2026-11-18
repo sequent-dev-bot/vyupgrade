@@ -30,6 +30,7 @@ from uv import find_uv_bin
 from .ast_facts import compiler_source_sha256, iter_nodes
 from .compiler_runner import (
     INTERFACE_AST_FORMAT,
+    LOOP_TYPES_FORMAT,
     SOURCE_EVIDENCE_FORMATS,
     SOURCE_VALIDATION_ARGUMENT,
     source_validation_command,
@@ -1281,6 +1282,10 @@ def _source_evidence_formats(config: Config) -> tuple[str, ...]:
     selected = (call_codes & config.select) if config.select else call_codes
     if target >= Version("0.4.0") and selected - config.ignore:
         formats.append("external_calls_v1")
+    if target >= Version("0.4.0") and "VY070" not in config.ignore and (
+        not config.select or "VY070" in config.select
+    ):
+        formats.append(LOOP_TYPES_FORMAT)
     if _wants_interface_ast(config):
         formats.append(INTERFACE_AST_FORMAT)
     if (
@@ -2006,7 +2011,8 @@ def _run_compile_with_formats(
         exit_status=process.exit_status,
         validated_sources=process.validated_sources,
     )
-    if result.status == "passed" and isinstance(process.rewrite_evidence, dict):
+    # Before 0.2.16 a source compile is degraded only by its missing layout output.
+    if result.status in {"passed", "degraded"} and isinstance(process.rewrite_evidence, dict):
         for name in requested_evidence:
             evidence = process.rewrite_evidence.get(name)
             if not isinstance(evidence, dict):

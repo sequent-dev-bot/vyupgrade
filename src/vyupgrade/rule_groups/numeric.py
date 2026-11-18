@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import re
 
 from ..analysis import (
@@ -29,11 +28,7 @@ from ..source import (
     split_top_level_args,
     span_is_code,
 )
-from .numeric_shift import (
-    constant_shift_replacement,
-    integer_expression_type,
-    runtime_shift_replacement,
-)
+from .numeric_shift import constant_shift_replacement, runtime_shift_replacement
 from .numeric_types import (
     is_signed_integer_type as _is_signed_integer_type,
 )
@@ -593,14 +588,9 @@ def _redundant_integer_convert(
             continue
         expr_type = infer_expr_type(expr, vars_for_line, facts)
         if (
-            (
-                (
-                    (is_integer_type(target) or normalize_type(target) == "bytes32")
-                    and normalize_type(expr_type or "") == normalize_type(target)
-                    and _simple_nonliteral_expr(expr)
-                )
-                or _same_type_integer_arithmetic(expr, target, vars_for_line, facts)
-            )
+            (is_integer_type(target) or normalize_type(target) == "bytes32")
+            and normalize_type(expr_type or "") == normalize_type(target)
+            and _simple_nonliteral_expr(expr)
             and not _target_semantic_convert(expr, target)
         ):
             replacement = _redundant_convert_replacement(expr)
@@ -635,30 +625,6 @@ def _redundant_integer_convert(
                 )
             )
     return apply_edits(source, edits), fixes, []
-
-
-_SAME_TYPE_OPERATORS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod)
-
-
-def _same_type_integer_arithmetic(
-    expr: str, target: str, vars_for_line: dict[str, str], facts: SourceFacts
-) -> bool:
-    """True when ``expr`` is ``+ - * / %`` arithmetic whose typed operands all have type ``target``.
-
-    Vyper gives such arithmetic the type its typed operands share (literals adapt), so a
-    ``convert`` to that type is a same-type conversion, which the compiler rejects. ``**`` is
-    left alone: its result has the base's type, which a literal base takes from context.
-    """
-    if not is_integer_type(target) or "**" in expr:
-        return False
-    try:
-        node = ast.parse(expr.strip(), mode="eval").body
-    except (SyntaxError, ValueError):
-        return False
-    arithmetic = (isinstance(node, ast.BinOp) and isinstance(node.op, _SAME_TYPE_OPERATORS)) or (
-        isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub)
-    )
-    return arithmetic and integer_expression_type(expr, vars_for_line, facts) == normalize_type(target)
 
 
 def _target_semantic_convert(expr: str, target: str) -> bool:

@@ -211,12 +211,13 @@ def _mixed_signed_unsigned_arithmetic(
                 local_expr = _local_expression(source, start)
                 comparison_expr = _comparison_expression_at(source, start)
                 comparison_peer = _comparison_peer(comparison_expr, name)
+                constant_peer = comparison_peer or _comparison_other_side(comparison_expr, name)
                 if (
-                    comparison_peer in constant_values
-                    and comparison_peer in facts.global_vars
-                    and _is_signed_integer_type(vars_for_line.get(comparison_peer))
+                    constant_peer in constant_values
+                    and constant_peer in facts.global_vars
+                    and _is_signed_integer_type(vars_for_line.get(constant_peer))
                     and _integer_value_fits_type(
-                        constant_values[comparison_peer], loop_type
+                        constant_values[constant_peer], loop_type
                     )
                 ):
                     # The signed-name pass casts this constant to the loop
@@ -1208,6 +1209,23 @@ def _comparison_peer(expr: str, name: str) -> str | None:
         return right
     if right == name:
         return left
+    return None
+
+
+def _comparison_other_side(expr: str, name: str) -> str | None:
+    """The side of a single comparison opposite the one using ``name``, as in ``x + 1 == N``."""
+    expr = expr.strip().removesuffix(":").strip()
+    expr = re.sub(r"^(?:if|elif|assert|return)\s+", "", expr)
+    if " and " in expr or " or " in expr:
+        return None
+    match = re.match(r"(.+?)\s*(==|!=|<=|>=|<|>)\s*(.+)\Z", expr)
+    if match is None:
+        return None
+    left, _op, right = (_strip_comparison_wrappers(part) for part in match.groups())
+    in_left = re.search(rf"\b{re.escape(name)}\b", left) is not None
+    in_right = re.search(rf"\b{re.escape(name)}\b", right) is not None
+    if in_left != in_right:
+        return right if in_left else left
     return None
 
 

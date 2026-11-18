@@ -21,7 +21,13 @@ _VERSION_PATTERN = re.compile(r"\b\d+\.\d+\.\d+(?:[A-Za-z0-9.+-]*)?\b")
 _MANAGED_WORKER_ARGUMENT = "--managed-compiler-worker"
 SOURCE_VALIDATION_ARGUMENT = "--source-validation"
 INTERFACE_AST_FORMAT = "interface_ast_v1"
+LOOP_TYPES_FORMAT = "loop_types_v1"
 SOURCE_EVIDENCE_FORMATS = {
+    # Before 0.3.2, constants fold to untyped literals ahead of type checking, and an
+    # unannotated loop variable takes the first candidate type its body accepts.
+    **{f"0.2.{patch}": LOOP_TYPES_FORMAT for patch in range(17)},
+    "0.3.0": LOOP_TYPES_FORMAT,
+    "0.3.1": LOOP_TYPES_FORMAT,
     "0.3.10": "external_calls_v1",
     "0.4.3": INTERFACE_AST_FORMAT,
     "0.5.0a3": "annotated_ast",
@@ -319,6 +325,8 @@ def _managed_compiler_result(command: list[str], captured=None) -> dict[str, obj
 
 
 def _collect_source_evidence(data, evidence_format):
+    if evidence_format == LOOP_TYPES_FORMAT:
+        return _loop_types(data)
     if evidence_format == "external_calls_v1":
         from vyper.evm.opcodes import anchor_evm_version
 
@@ -340,6 +348,34 @@ def _collect_source_evidence(data, evidence_format):
                 with anchor_settings(data.settings):
                     return build_annotated_ast_dict(data)
     return None
+
+
+def _loop_types(compiler_data):
+    from vyper import ast as vy_ast
+
+    loops = []
+    for node in compiler_data.vyper_module_folded.get_descendants(vy_ast.For):
+        loop_type = node.target._metadata.get("type")
+        if loop_type is None or not isinstance(node.target, vy_ast.Name):
+            # Rules pair loops by position, so a partial list would misattribute types.
+            return None
+        loops.append(
+            {
+                "line": node.lineno,
+                "column": node.col_offset,
+                "name": node.target.id,
+                "type": str(loop_type),
+            }
+        )
+    if not loops:
+        return None
+    loops.sort(key=lambda loop: (loop["line"], loop["column"]))
+    # Like 0.3.10's, these CLIs append one newline to the text they read.
+    source = compiler_data.source_code
+    if not source.endswith("\n"):
+        return None
+    source_sha256sum = hashlib.sha256(source[:-1].encode("utf-8")).hexdigest()
+    return {"source_sha256sum": source_sha256sum, "loops": loops}
 
 
 def _external_calls_0310(compiler_data):

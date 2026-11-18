@@ -749,46 +749,6 @@ def f() -> uint256:
     assert any(fix.rule == "VY051" for fix in result.fixes)
 
 
-def test_redundant_convert_removed_around_same_type_arithmetic(config) -> None:
-    source = """# @version 0.2.15
-interface ERC20:
-    def decimals() -> uint256: view
-
-MAX_COINS: constant(int128) = 8
-
-@external
-@view
-def f(coins: address[MAX_COINS], n: uint256) -> uint256:
-    decimals: uint256 = 0
-    for i in range(MAX_COINS):
-        if i == n:
-            break
-        decimals += shift(ERC20(coins[i]).decimals(), convert(i*8, int128))
-    return decimals
-"""
-
-    result = apply_rules(source, config(target_version="0.4.3"))
-
-    assert "for i: int128 in range(MAX_COINS):" in result.source
-    assert "decimals += shift(staticcall ERC20(coins[convert(i, uint256)]).decimals(), (i*8))" in result.source
-    assert any(fix.rule == "VY051" and fix.line == 14 for fix in result.fixes)
-    assert apply_rules(result.source, config(target_version="0.4.3")).source == result.source
-
-
-def test_redundant_convert_kept_around_other_type_or_power_arithmetic(config) -> None:
-    source = """# @version 0.3.10
-@external
-@pure
-def f(b: uint8, k: int128) -> int128:
-    return convert(b * 2, int128) + convert(2 ** k, int128)
-"""
-
-    result = apply_rules(source, config(target_version="0.4.3"))
-
-    assert "return convert(b * 2, int128) + convert(2 ** k, int128)" in result.source
-    assert not any(fix.rule == "VY051" for fix in result.fixes)
-
-
 def test_redundant_prevrandao_bytes32_convert_removed(config) -> None:
     source = """# @version 0.3.6
 @external

@@ -418,6 +418,7 @@ class CompilerFacts:
     ast: dict[str, Any] | None = None
     annotated_ast: dict[str, Any] | None = None
     external_calls: dict[str, Any] | None = None
+    loop_types: dict[str, Any] | None = None
 
     @classmethod
     def from_artifacts(cls, artifacts: dict[str, object] | None) -> CompilerFacts:
@@ -425,7 +426,12 @@ class CompilerFacts:
             value = artifacts.get(name) if artifacts else None
             return value if isinstance(value, dict) else None
 
-        return cls(output("ast"), output("annotated_ast"), output("external_calls_v1"))
+        return cls(
+            output("ast"),
+            output("annotated_ast"),
+            output("external_calls_v1"),
+            output("loop_types_v1"),
+        )
 
 
 @dataclass
