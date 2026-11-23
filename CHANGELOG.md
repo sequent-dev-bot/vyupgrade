@@ -26,6 +26,13 @@
   fits its type unconverted (`VY052`). It used to cast the signed operand to
   `uint256`, so the migrated contract reverted whenever that operand was
   negative.
+- Validate a project module that `uses:` another module through the project
+  contracts that import and initialize it (`consumer-roots`), as dependencies
+  already are. Vyper refuses such a module as a compilation target, so its
+  standalone source compile failed with `InitializerException` and blocked the
+  run. A contract counts when its own source compile passed and the compiler
+  loaded the module, which only managed compilers report: with no such
+  contract among the inputs, or with `--source-vyper`, it still fails.
 
 ## 0.11.0 - 2026-11-18
 
